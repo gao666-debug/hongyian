@@ -1,0 +1,8 @@
+.hvigor/
+oh_modules/
+node_modules/
+entry/build/
+build/
+*.p12
+*.p7b
+local.properties

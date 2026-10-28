@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "ability_desc",
+      "value": "独居老人居家安全监测"
+    },
+    {
+      "name": "internet_reason",
+      "value": "用于连接居家安全后端，查看设备状态与处理报警"
+    }
+  ]
+}

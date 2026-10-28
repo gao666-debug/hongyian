@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "eldercare",
+  "version": "1.0.0",
+  "description": "知安 居家安全守护",
+  "dependencies": {},
+  "devDependencies": {}
+}

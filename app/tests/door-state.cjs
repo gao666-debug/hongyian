@@ -1,0 +1,22 @@
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const assert = require('assert');
+const root = path.resolve(__dirname, '..');
+const source = fs.readFileSync(path.join(root, 'entry/src/main/ets/models/DoorState.ets'), 'utf8');
+const body = source.slice(source.indexOf('export function doorLabel'))
+  .replace('export function doorLabel(input: DoorReading): string', 'function doorLabel(input)');
+const context = {}; vm.createContext(context); vm.runInContext(body, context);
+const normal = {demo:false, fresh:true, healthFresh:true, enabled:1, valid:1, value:0};
+const check = (changes, expected) => assert.strictEqual(context.doorLabel({...normal, ...changes}), expected);
+check({}, '关闭'); check({value:1}, '打开');
+check({value:-1}, '等待房门数据'); check({valid:0,value:0}, '读数无效');
+check({valid:-1,value:0}, '最近上报：关闭'); check({valid:-1,value:1}, '最近上报：打开');
+check({fresh:false,value:0}, '等待新上报'); check({healthFresh:false}, '接入状态待确认');
+check({enabled:0}, '未开启'); check({enabled:-1}, '接入状态待确认');
+check({demo:true,fresh:false}, '演示 · 房门关闭');
+const backend = fs.readFileSync(path.join(root,'entry/src/main/ets/services/Backend.ets'),'utf8');
+assert(backend.includes('&ticket=${encodeURIComponent(ticket)}'));
+assert(backend.includes('/api/v1/ws?device_id=${encodeURIComponent(this.device)}'));
+assert(backend.includes("'qbot-public.crt'"));
+console.log('PASS: 11 room-door states and public TLS/WS configuration checks');
