@@ -25,7 +25,7 @@
 
 #include "watch_sensor.h"
 #include "watch_ui.h"
-#include "board_check.h"
+
 
 #define WATCH_UI_TASK_STACK       0x2000
 #define WATCH_UI_TASK_PRIO        24
@@ -43,11 +43,7 @@ static void watch_entry(void)
     printf("  LCD 1.28\" GC9A01 240x240 + MPU6050 + MAX3010x\r\n");
     printf("==============================================\r\n");
 
-    /* 整板自检：跑在起任务之前，单独占 CPU、单独占 I2C 引脚，
-     * 免得和传感器任务的 I2C 初始化抢总线。
-     * 自检若定位到屏的时钟脚，会自己把 LCD 的 clk 换成那个脚
-     * （见 board_check.c 的 bc_lcd()）。 */
-    board_check_run();
+    /* Whole-board GPIO scanning is deliberately excluded from normal startup. */
 
     osal_kthread_lock();
 
