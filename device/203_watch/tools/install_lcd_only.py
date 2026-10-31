@@ -29,6 +29,9 @@ def install(sdk, demo=None, config=None):
         if not (source / name).is_file():
             raise ValueError(f'Missing source file: {name}')
     cmake_text, kconfig_text, config_text = [p.read_text(encoding='utf-8') for p in (cmake, kconfig, config)]
+    exports = list(re.finditer(r'set\s*\(\s*SOURCES\b[^)]*\bPARENT_SCOPE\s*\)', cmake_text, re.S))
+    if not exports:
+        raise ValueError('Cannot identify final demo SOURCES export; no files changed. Review this SDK CMake manually.')
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     backup = sdk / 'hongyian-backups' / stamp
     backup.mkdir(parents=True)
@@ -52,6 +55,33 @@ set(SOURCES "${SOURCES}"
         if pos < 0: pos = len(cmake_text)
         block = '\nif(DEFINED CONFIG_SAMPLE_SUPPORT_203_WATCH)\n    add_subdirectory_if_exist(203_watch)\nendif()\n\n'
         cmake_text = cmake_text[:pos] + block + cmake_text[pos:]
+    # Config files can be regenerated from another preset. Exclude other demo
+    # sources at the final export as well, rather than trusting one config file.
+    cmake_text = re.sub(r'\n# HY_LCD_ONLY_GUARD_BEGIN\n.*?# HY_LCD_ONLY_GUARD_END\n', '', cmake_text, flags=re.S)
+    guard = r'''
+# HY_LCD_ONLY_GUARD_BEGIN
+foreach(_hy_source IN LISTS SOURCES)
+    file(TO_CMAKE_PATH "${_hy_source}" _hy_normal)
+    if(_hy_normal MATCHES "/demo/" AND NOT _hy_normal MATCHES "/203_watch/(lcd_only_main|lcd_bringup)[.]c$")
+        message(STATUS "HY-LCD-ONLY exclude old demo: ${_hy_source}")
+        list(REMOVE_ITEM SOURCES "${_hy_source}")
+    endif()
+endforeach()
+set(_hy_entry_found FALSE)
+foreach(_hy_source IN LISTS SOURCES)
+    file(TO_CMAKE_PATH "${_hy_source}" _hy_normal)
+    if(_hy_normal MATCHES "/203_watch/lcd_only_main[.]c$")
+        set(_hy_entry_found TRUE)
+    endif()
+endforeach()
+if(NOT _hy_entry_found)
+    message(FATAL_ERROR "HY-LCD-ONLY entry missing: actual build config did not select 203_watch")
+endif()
+# HY_LCD_ONLY_GUARD_END
+'''
+    exports = list(re.finditer(r'set\s*\(\s*SOURCES\b[^)]*\bPARENT_SCOPE\s*\)', cmake_text, re.S))
+    pos = exports[-1].start()
+    cmake_text = cmake_text[:pos] + guard + cmake_text[pos:]
     if not re.search(r'^config SAMPLE_SUPPORT_203_WATCH\s*$', kconfig_text, re.M):
         kconfig_text += '\nconfig SAMPLE_SUPPORT_203_WATCH\n    bool "Hongyian fixed-pin LCD test"\n    default n\n    depends on ENABLE_DEMO_SAMPLE\n'
     config_text = re.sub(r'^CONFIG_SAMPLE_SUPPORT_([A-Za-z0-9_]+)=y[ \t]*$',
@@ -75,6 +105,7 @@ set(SOURCES "${SOURCES}"
         print(hashlib.sha256((dest / name).read_bytes()).hexdigest(), name)
     print('Build with your existing SDK environment: python build.py -nhso -j8 ws63-liteos-app')
     print('Do not use old custom pack_fw.py silently: flash this build output using the validated SDK workflow.')
+    print('Before flashing, run verify_lcd_image.py on the application ELF or uncompressed BIN (not outer fwpkg).')
     return dest, backup
 
 

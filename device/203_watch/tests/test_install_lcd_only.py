@@ -39,6 +39,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(selected, ['CONFIG_SAMPLE_SUPPORT_203_WATCH=y'])
             self.assertIn('CONFIG_OTHER=y\n', config.read_text())
             self.assertEqual((demo / 'CMakeLists.txt').read_text().count('add_subdirectory_if_exist(203_watch)'), 1)
+            self.assertEqual((demo / 'CMakeLists.txt').read_text().count('# HY_LCD_ONLY_GUARD_BEGIN'), 1)
+            self.assertIn('HY-LCD-ONLY entry missing', (demo / 'CMakeLists.txt').read_text())
             self.assertNotIn('lcd_diag.c', (dest / 'CMakeLists.txt').read_text())
             self.assertIn('lcd_bringup.c', (dest / 'CMakeLists.txt').read_text())
 
