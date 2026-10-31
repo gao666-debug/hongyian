@@ -6,6 +6,7 @@
 
 - `backend/`：FastAPI 后端、SQLite、IoTDA 应用接口、AMQP 消费者与测试。
 - `app/`：HarmonyOS ArkTS App，含总览、报警处理、趋势与生活提醒。
+- `device/203_watch/`：WS63 星闪手表扩展模块固件（1.28″ 圆屏 + MPU6050 + MAX3010x），含整板自检与点亮排查记录。
 - `docs/`：架构规划与协作说明。
 
 ## 本地运行后端

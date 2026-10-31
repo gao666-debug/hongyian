@@ -1,0 +1,10 @@
+set(SOURCES "${SOURCES}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/main.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/board_check.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/watch_ui.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/watch_sensor.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lcd.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lcd_init.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/bsp_iic.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/algorithm.c"
+    PARENT_SCOPE)
