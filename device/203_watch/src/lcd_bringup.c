@@ -29,11 +29,13 @@ static void level(int pin, int high)
 static void output(int pin, int idle)
 {
     remember((uint32_t)uapi_pin_set_mode(pin, 0), "mux", pin);
-    /* Program the output latch before enabling the output driver. */
-    level(pin, idle);
+    /* LOCAL BRING-UP PATCH (not upstream): WS63 HAL returns
+     * ERRCODE_GPIO_STATE_MISMATCH (0x80001006) if set_val is called while the
+     * pin is still an input, so direction must be switched first. */
     if (s_error == 0) {
         remember((uint32_t)uapi_gpio_set_dir(pin, GPIO_DIRECTION_OUTPUT), "direction", pin);
     }
+    level(pin, idle);
 }
 
 static void delay_ms(unsigned int ms)

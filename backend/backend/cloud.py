@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import watch as watch_model
+
 
 def json_numbers(value):
     """Convert SDK Decimal property values before SQLite/JSON serialization."""
@@ -22,6 +24,7 @@ class HuaweiCloud:
         from huaweicloudsdkcore.region.region import Region
         from huaweicloudsdkcore.http.http_config import HttpConfig
         from huaweicloudsdkiotda.v5 import IoTDAClient
+        self.settings = settings
         credentials = BasicCredentials(settings.ak,settings.sk,settings.project_id)
         credentials.with_derived_predicate(DerivedCredentials.get_default_derived_predicate())
         config = HttpConfig()
@@ -40,7 +43,13 @@ class HuaweiCloud:
                 status = None
         except Exception as exc:
             raise CloudError('IoTDA shadow request failed') from exc
-        service = next((s for s in raw.get('shadow',[]) if s.get('service_id')=='HomeSafety'),{})
+        services = raw.get('shadow',[])
+        # 主板和手表挂在同一个设备下时会有两条 service：先找主板，再退回手表。
+        service = next((s for s in services if s.get('service_id')==self.settings.service_id),None)
+        if service is None:
+            service = watch_model.pick_service(services,self.settings.watch_service_id)
+        if service is None:
+            service = {}
         report = service.get('reported') or {}
         stamp = report.get('event_time')
         if stamp:
@@ -48,15 +57,26 @@ class HuaweiCloud:
                 stamp = datetime.strptime(stamp,'%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc).isoformat().replace('+00:00','Z')
             except ValueError:
                 pass
-        return {'device_id':device,'service_id':'HomeSafety',
+        properties = json_numbers(report.get('properties') or {})
+        data = {'device_id':device,'service_id':service.get('service_id',self.settings.service_id),
                 'online':True if status=='ONLINE' else False if status=='OFFLINE' else None,
-                'updated_at':stamp,'properties':json_numbers(report.get('properties') or {})}
+                'updated_at':stamp,'properties':properties}
+        if service.get('service_id') != self.settings.service_id:
+            # 手表：额外给一份归一化结果，App 不用自己换算 mg -> g
+            data['kind'] = 'watch'
+            try:
+                data['watch'] = watch_model.normalize(properties,
+                                                      service_id=data['service_id'],
+                                                      received_at=stamp)
+            except watch_model.WatchReportError:
+                data['watch'] = None
+        return data
 
     def command(self, device, name, paras=None):
         from huaweicloudsdkiotda.v5 import CreateCommandRequest, DeviceCommandRequest
         try:
             raw = self.client.create_command(CreateCommandRequest(device_id=device,
-                  body=DeviceCommandRequest(service_id='HomeSafety',command_name=name,paras=paras or {}))).to_dict()
+                  body=DeviceCommandRequest(service_id=self.settings.service_id,command_name=name,paras=paras or {}))).to_dict()
         except Exception as exc:
             raise CloudError('IoTDA command outcome unknown') from exc
         response = raw.get('response')

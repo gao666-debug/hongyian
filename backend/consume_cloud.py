@@ -19,7 +19,9 @@ def notification(body):
     payload = json.loads(body) if isinstance(body, str) else body
     if not isinstance(payload, dict):
         raise ValueError('Expected IoTDA notification')
-    if payload.get('resource') != 'device.message' or payload.get('event') != 'report':
+    # 主板走自定义消息（device.message），手表走属性上报（device.property），
+    # 两条链路都由后端同一个 webhook 分辨处理。
+    if payload.get('resource') not in ('device.message', 'device.property') or payload.get('event') != 'report':
         raise ValueError('Unsupported notification type')
     return payload
 
@@ -55,7 +57,10 @@ class Receiver(MessagingHandler):
         try:
             payload = notification(event.message.body)
             device = payload['notify_data']['header']['device_id']
-            if device != self.settings.device_id:
+            allowed = {self.settings.device_id}
+            if self.settings.watch_device_id:
+                allowed.add(self.settings.watch_device_id)
+            if device not in allowed:
                 event.delivery.update(Delivery.REJECTED)
                 event.delivery.settle()
                 return

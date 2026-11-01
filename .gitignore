@@ -19,3 +19,8 @@
 *.hap
 *.hsp
 *.log
+
+# 手表固件：本地凭据与构建产物
+device/203_watch/src/hy_cloud_cfg.h
+device/**/*.fwpkg
+device/**/*.log
