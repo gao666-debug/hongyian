@@ -66,7 +66,11 @@
 
 // #define true 1
 // #define false 0
-#define FS 100
+/* 本地改动（鸿颐安）：MAX30100 实测出点约 200Hz，算法就按 200Hz 配置，
+ * 不再靠"每 N 点取 1 点"把速率压到 100Hz——那样会让采样间隔不匀，
+ * 峰值检测直接失效（实测心率会跳到 300~500）。
+ * FS 只参与 BUFFER_SIZE 计算，改成 200 即窗口 = 5 秒 = 1000 点。 */
+#define FS 200
 #define BUFFER_SIZE  (FS* 5) 
 #define HR_FIFO_SIZE 7
 #define MA4_SIZE  4 // DO NOT CHANGE

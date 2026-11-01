@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ConfigDict, ValidationError, StrictBool, 
 from .settings import Settings
 from .store import Store, digest
 from .cloud import HuaweiCloud, CloudError
+from . import watch as watch_model
 from .medicine import LivingConfig, MedicinePlan, MedicineConfirmation, MedicineChange, LivingStatus, mock_living_command
 
 
@@ -46,6 +47,14 @@ class DeviceMessage(StrictModel):
     name: Literal['alarm_event','device_health','activity_stats']
     id: str | None = Field(default=None,max_length=256)
     content: dict
+
+class WatchService(BaseModel):
+    # 手表物模型是产品侧自己建的，字段可能随固件增减，这里不锁死 extra。
+    service_id: str = Field(min_length=1,max_length=64)
+    properties: dict
+
+class WatchReport(BaseModel):
+    services: list[WatchService] = Field(min_length=1,max_length=16)
 
 class Alarm(BaseModel):
     schema_version: int = Field(default=1,alias="schema")
@@ -124,7 +133,11 @@ def create_app(settings=None, cloud=None):
                 'mode':settings.mode,'simulated':settings.mode=='mock'}
 
     def check_device(device):
-        if device != settings.device_id: raise HTTPException(404,'Device not configured')
+        # 手表是另一台直连设备，硬件 ID 和主板不同；配了 WATCH_DEVICE_ID 才放行。
+        allowed = {settings.device_id}
+        if settings.watch_device_id:
+            allowed.add(settings.watch_device_id)
+        if device not in allowed: raise HTTPException(404,'Device not configured')
 
     def session(authorization: str | None = Header(default=None)):
         if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -255,6 +268,28 @@ def create_app(settings=None, cloud=None):
         check_device(device)
         return envelope({'items':store.list_docs(settings.mode,device,'medicine_history',limit)})
 
+    @app.get('/api/v1/devices/{device}/watch')
+    def watch_latest(device,user=Depends(session)):
+        check_device(device)
+        data=store.doc(settings.mode,settings.device_id,'watch')
+        if data is None: raise HTTPException(404,'No watch report yet')
+        return envelope(data)
+
+    @app.get('/api/v1/devices/{device}/watch/hours')
+    def watch_hours(device,limit: int=Query(default=24,ge=1,le=720),user=Depends(session)):
+        check_device(device)
+        items=store.list_docs(settings.mode,settings.device_id,'watch_hour',limit)
+        for item in items:
+            for name in ('hr','spo2'):
+                agg=item.get(name)
+                if agg: agg['avg']=round(agg['sum']/agg['n'],1) if agg['n'] else None
+        return envelope({'items':items,'limit':limit})
+
+    @app.get('/api/v1/devices/{device}/watch/falls')
+    def watch_falls(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
+        check_device(device)
+        return envelope({'items':store.list_docs(settings.mode,settings.device_id,'watch_fall',limit)})
+
     @app.post('/api/v1/commands',status_code=202)
     async def commands(body: Command,user=Depends(session)):
         check_device(body.device_id)
@@ -326,6 +361,38 @@ def create_app(settings=None, cloud=None):
             await asyncio.gather(send_task,receive_task,return_exceptions=True)
             hub.clients[device_id].discard(queue)
 
+    async def ingest_watch(device,payload):
+        """手表属性上报入库：最新值 + 小时桶 + 摔倒事件，并实时推给 App。"""
+        check_device(device)
+        # 手表数据统一挂在 App 面向的那台设备下，App 不用区分两颗芯片
+        device = settings.device_id
+        services = payload.get('services')
+        if services is None and 'properties' in payload:
+            services = [payload]        # IoTDA 通知里 body 是单条 service
+        service = watch_model.pick_service(services,settings.watch_service_id)
+        if service is None:
+            raise HTTPException(422,'No watch service in property report')
+        try:
+            report = watch_model.normalize(service.get('properties'),service.get('service_id',''),utc())
+        except watch_model.WatchReportError:
+            raise HTTPException(422,'Invalid watch properties')
+        previous = store.doc(settings.mode,device,'watch') or {}
+        store.put(settings.mode,device,'watch',report)
+        hour = store.watch_hour(settings.mode,device,report)
+        # fall_count 只增不减，差值就是这一条上报里新增的摔倒判定
+        known = previous.get('fall_count') or 0
+        events = []
+        for index in range(known+1,report['fall_count']+1):
+            event = {'kind':'watch_fall','fall_count':index,'detected_at':report['received_at'],
+                     'heart_rate':report['heart_rate'],'spo2':report['spo2'],
+                     'motion_mg':report['motion_mg'],'steps':report['steps']}
+            store.put(settings.mode,device,'watch_fall',event,str(index))
+            events.append(event)
+        await publish(device,'watch',report)
+        for event in events:
+            await publish(device,'watch_fall',event)
+        return envelope({'accepted':True,'fall_events':len(events),'hour':hour['hour']})
+
     async def ingest(device,message):
         check_device(device)
         try:
@@ -374,6 +441,11 @@ def create_app(settings=None, cloud=None):
         if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
         return await ingest(device_id,message)
 
+    @app.post('/api/v1/mock/watch')
+    async def mock_watch(report: WatchReport,device_id: str=Query(...),user=Depends(session)):
+        if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
+        return await ingest_watch(device_id,report.model_dump())
+
     @app.post('/api/v1/iotda/notifications')
     async def notifications(request: Request,token: str | None=Query(default=None),x_webhook_token: str | None=Header(default=None)):
         supplied=x_webhook_token or token or ''
@@ -383,11 +455,19 @@ def create_app(settings=None, cloud=None):
         if len(raw)>262144: raise HTTPException(413,'Notification too large')
         try:
             payload=json.loads(raw)
-            if payload.get('resource')!='device.message' or payload.get('event')!='report':
+            resource=payload.get('resource')
+            if payload.get('event')!='report' or resource not in ('device.message','device.property'):
                 raise ValueError()
             notify=payload['notify_data']
             device=notify['header']['device_id']
-            content=notify['body']['content']
+            body=notify['body']
+        except (KeyError,TypeError,ValueError,AttributeError):
+            raise HTTPException(422,'Expected IoTDA device.message/device.property report')
+        if resource=='device.property':
+            # 属性上报走手表链路：service_id + properties
+            return await ingest_watch(device,body if isinstance(body,dict) else json.loads(body))
+        try:
+            content=body['content']
             if isinstance(content,str): content=json.loads(content)
             message=DeviceMessage.model_validate(content)
         except (KeyError,TypeError,ValueError,ValidationError):

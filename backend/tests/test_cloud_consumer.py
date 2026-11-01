@@ -19,8 +19,10 @@ class CloudConsumerTests(unittest.TestCase):
 
     def test_accepts_json_bytes_and_rejects_unrelated_messages(self):
         self.assertEqual(notification(json.dumps(self.payload).encode()), self.payload)
+        # 手表的属性上报也要放行，其余资源类型仍然拒收
+        self.assertEqual(notification({'resource': 'device.property', 'event': 'report'})['resource'], 'device.property')
         with self.assertRaises(ValueError):
-            notification({'resource': 'device.property', 'event': 'report'})
+            notification({'resource': 'device.status', 'event': 'report'})
 
     @patch('consume_cloud.requests.post')
     def test_acknowledges_after_ingestion_succeeds(self, post):

@@ -13,6 +13,12 @@ class Settings:
     password: str = ''
     webhook_token: str = ''
     device_id: str = 'demo-device'
+    # 手表（WS63 穿戴节点）在 IoTDA 里是另一台直连设备，可能和主板不同 ID。
+    # 留空表示手表与主板共用 device_id。
+    watch_device_id: str = ''
+    # 产品物模型里的服务 ID。主板是 HomeSafety，手表是产品自定义的那个（本产品是 "11"）。
+    service_id: str = 'HomeSafety'
+    watch_service_id: str = '11'
     cloud_endpoint: str = 'https://YOUR_INSTANCE.iotda-app.cn-east-3.myhuaweicloud.com'
     region: str = 'cn-east-3'
     project_id: str = ''
@@ -30,6 +36,9 @@ class Settings:
                    password=os.getenv('APP_PASSWORD', ''),
                    webhook_token=os.getenv('WEBHOOK_TOKEN', ''),
                    device_id=os.getenv('DEVICE_ID', cls.device_id),
+                   watch_device_id=os.getenv('WATCH_DEVICE_ID', ''),
+                   service_id=os.getenv('IOTDA_SERVICE_ID', cls.service_id),
+                   watch_service_id=os.getenv('WATCH_SERVICE_ID', cls.watch_service_id),
                    cloud_endpoint=os.getenv('IOTDA_ENDPOINT', cls.cloud_endpoint),
                    region=os.getenv('IOTDA_REGION', 'cn-east-3'),
                    project_id=os.getenv('IOTDA_PROJECT_ID', ''),

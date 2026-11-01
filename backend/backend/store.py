@@ -130,6 +130,48 @@ class Store:
             if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(mode,device,'medicine_history',key)).fetchone():
                 self.put(mode,device,'medicine_history',value,key,db)
 
+    def watch_hour(self, mode, device, report, db=None):
+        """把手表上报按小时滚成一个桶。
+
+        手表每 10 秒一条，一天 8640 条，全存会撑爆 SQLite 也没人看；
+        App 的趋势页只要小时粒度，所以这里只留 min/max/均值/步数增量/摔倒次数。
+        心率、血氧为 0 表示这次没测到，不进统计（否则会把均值拉到 0）。
+        """
+        if db is None:
+            with self.connection() as conn:
+                return self.watch_hour(mode, device, report, conn)
+        hour = str(report['received_at'])[:13]          # 2026-11-01T03
+        row = db.execute('SELECT body FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',
+                         (mode, device, 'watch_hour', hour)).fetchone()
+        bucket = json.loads(row['body']) if row else {'hour': hour, 'samples': 0}
+        bucket['samples'] = bucket.get('samples', 0) + 1
+        for name, value in (('hr', report.get('heart_rate')), ('spo2', report.get('spo2'))):
+            if not value:
+                continue
+            agg = bucket.get(name) or {'min': value, 'max': value, 'sum': 0, 'n': 0}
+            agg['min'] = min(agg['min'], value)
+            agg['max'] = max(agg['max'], value)
+            agg['sum'] += value
+            agg['n'] += 1
+            bucket[name] = agg
+        steps = report.get('steps', 0)
+        if bucket.get('steps_first') is None:
+            bucket['steps_first'] = steps
+        bucket['steps_last'] = steps
+        # 计步器重启会归零，负增量按 0 处理，不冒充"倒着走"
+        bucket['steps_delta'] = max(0, bucket['steps_last'] - bucket['steps_first'])
+        motion = report.get('motion_mg', 0)
+        bucket['motion_max'] = max(bucket.get('motion_max') or 0, motion)
+        bucket['motion_min'] = min(bucket.get('motion_min', motion), motion)
+        falls = report.get('fall_count', 0)
+        if bucket.get('fall_first') is None:
+            bucket['fall_first'] = falls
+        bucket['fall_last'] = falls
+        bucket['falls'] = max(0, bucket['fall_last'] - bucket['fall_first'])
+        bucket['fall_active'] = bool(report.get('fall_active'))
+        self.put(mode, device, 'watch_hour', bucket, hour, db)
+        return bucket
+
     def command(self, command_id, mode, device=None):
         with self.connection() as db:
             row = db.execute('SELECT * FROM commands WHERE id=? AND mode=?', (command_id,mode)).fetchone()
