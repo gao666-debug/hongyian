@@ -1,7 +1,9 @@
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { router } from '@kit.ArkUI';
 import { promptAction } from '@kit.ArkUI';
+import { CareTheme } from '../theme/CareTheme';
 import { Backend } from '../services/Backend';
 import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate } from '../models/Living';
 import { AlarmSnapshot, alarmStateLabel, alarmIsActive, noteText, resolutionLabel } from '../models/AlarmState';
@@ -10,12 +12,12 @@ import { AlarmInbox, mergeAlarms } from '../models/AlarmInbox';
 import { assessCare, CareAssessment } from '../models/CareAssessment';
 import { Shadow, Health, Properties, AlarmEvent, AlarmList, Statistics, DayStats, Command, CommandRequest, LivingStatus, MedicineSlot, MedicineDraft, MedicineHistory, MedicineRecord, CommandParameters, NoteList, NoteItem, Push, alarmTitle, alarmKey, alarmTime } from '../models/Models';
 
-const INK: string = '#18343F';
-const SUB: string = '#7B8D94';
-const TEAL: string = '#159A91';
-const BG: string = '#F4F7F8';
-const RED: string = '#D55A55';
-const AMBER: string = '#C78E35';
+const INK: string = CareTheme.ink;
+const SUB: string = CareTheme.secondary;
+const PRIMARY: string = CareTheme.primary;
+const BG: string = CareTheme.background;
+const RED: string = CareTheme.alarm;
+const AMBER: string = CareTheme.warmInk;
 const DEVICE: string = 'demo-device';
 
 interface MetricView { icon: Resource; label: string; value: string; caption: string; tint: string; }
@@ -24,9 +26,46 @@ interface SectionView { title: string; subtitle: string; }
 interface SummaryView { label: string; value: string; }
 interface InfoView { label: string; value: string; color: string; }
 
+interface FamilyNode { device_id: string; kind: string; name: string; room: string; watch: WatchReading | null; properties: NodeProperties | null; updated_at: string | null; }
+interface NodeProperties { light?: number; smoke?: number; body?: number; door?: string; temp?: number; humi?: number; }
+interface WatchReading { heart_rate: number | null; spo2: number | null; steps: number; received_at: string; }
+interface FamilyData { name: string; role: string; devices: FamilyNode[]; }
+
 @Entry
 @Component
 struct Index {
+  @State familyNodes: FamilyNode[] = [];
+  @State familyRole: string = '';
+  @State memberName: string = '';
+  @State memberPassword: string = '';
+  @State memberReadOnly: boolean = true;
+  @State memberBusy: boolean = false;
+  @State memberMessage: string = '';
+  private async addMember(): Promise<void> {
+    if (this.memberBusy) { return; }
+    this.memberBusy=true;
+    try {
+      await this.api.request('/api/v1/household/members',http.RequestMethod.POST,JSON.stringify({username:this.memberName,password:this.memberPassword,role:this.memberReadOnly?'viewer':'caregiver'}));
+      this.memberPassword='';this.memberMessage='成员已创建，可在另一台手机使用该账号登录';
+    } catch (error) { this.memberMessage=(error as Error).message; }
+    finally { this.memberBusy=false; }
+  }
+
+  @State familyMessage: string = '登录后查看家庭设备';
+  private async refreshFamily(): Promise<void> {
+    const generation = this.generation;
+    try {
+      const response = await this.api.request('/api/v1/household');
+      if (generation !== this.generation || !this.loggedIn) { return; }
+      const family = response.data as FamilyData;
+      this.familyNodes = family.devices || [];
+      this.familyRole = family.role;
+      this.familyMessage = this.familyNodes.length ? '同一家庭，分布守护' : '暂未绑定设备';
+    } catch (error) {
+      if (generation === this.generation) { this.familyMessage = '家庭设备待接入 · 请更新后端'; }
+    }
+  }
+
   @State living: LivingStatus | null = null;
   @State livingOpen: boolean = false;
   @State livingDataFresh: boolean = false;
@@ -213,9 +252,11 @@ struct Index {
       this.applyProperties(shadow.properties || {});
       this.online = shadow.online === true; this.simulated = response.simulated === true;
       this.deviceTime = shadow.updated_at ? Date.parse(shadow.updated_at) : 0;
+      if (!full && this.refreshCount % 2 === 0) { await this.refreshFamily(); }
       this.received = Date.now(); this.refreshCount++; this.error = '';
       this.pruneAlerts();
       if (full) {
+        await this.refreshFamily();
         const health = await this.api.request(this.api.path('health'));
         if (generation !== this.generation) { return; }
         if (health.data) { this.applyHealth(health.data as Health); } else { this.healthKnown = false; this.living=null;this.medicineNotice=false; }
@@ -302,7 +343,7 @@ struct Index {
   }
   private assessmentColor(): string {
     const level = this.assessment().level;
-    return level === 'alert' ? RED : level === 'normal' ? TEAL : AMBER;
+    return level === 'alert' ? RED : level === 'normal' ? PRIMARY : AMBER;
   }
   private profilePrefix(): string { return this.loggedIn ? this.accountName : 'demo'; }
   private async loadProfile(): Promise<void> {
@@ -484,7 +525,7 @@ struct Index {
   }
   private askMedicine(slot: MedicineSlot): void {
     if(slot.state!==4){this.changeMedicine(slot.slot,true);return;}
-    promptAction.showDialog({title:'改为未服药？',message:'仅更改当天第 '+(slot.slot+1)+' 时段的记录。到时未服药提醒会恢复。',buttons:[{text:'取消',color:SUB},{text:'确认修改',color:TEAL}]}).then((result)=>{if(result.index===1){this.changeMedicine(slot.slot,false);}}).catch(()=>{});
+    promptAction.showDialog({title:'改为未服药？',message:'仅更改当天第 '+(slot.slot+1)+' 时段的记录。到时未服药提醒会恢复。',buttons:[{text:'取消',color:SUB},{text:'确认修改',color:PRIMARY}]}).then((result)=>{if(result.index===1){this.changeMedicine(slot.slot,false);}}).catch(()=>{});
   }
   private confirmMedicine(): void {
     const slot=pendingMedicine(this.living).find((item:MedicineSlot)=>item.slot===this.medicineNoticeSlot);
@@ -514,7 +555,7 @@ struct Index {
         const answer = await promptAction.showDialog({
           title: name === 'ack' ? '确认设备报警' : '设备状态待确认',
           message: scope + '\n' + detail,
-          buttons: [{ text: '取消', color: SUB }, { text: name === 'ack' ? '确认设备报警' : '尝试消音', color: TEAL }]
+          buttons: [{ text: '取消', color: SUB }, { text: name === 'ack' ? '确认设备报警' : '尝试消音', color: PRIMARY }]
         });
         if (answer.index !== 1) { return; }
       }
@@ -627,54 +668,67 @@ struct Index {
   @Builder
   metric($$: MetricView) {
     Column({ space: 12 }) {
-      Row() { Stack() { Rect().fill('#EFF7F5').width(36).height(36).radius(12); this.icon($$.icon, 21) }; Blank(); Text($$.label).fontSize(this.readableSize(13)).fontColor(SUB) }.width('100%')
+      Row() { Stack() { Rect().fill(CareTheme.softBlue).width(36).height(36).radius(12); this.icon($$.icon, 21) }; Blank(); Text($$.label).fontSize(this.readableSize(13)).fontColor(SUB) }.width('100%')
       Text($$.value).fontSize(this.readableSize(29)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
       Text($$.caption).fontSize(this.readableSize(11)).fontColor($$.tint).width('100%')
     }.padding(16).backgroundColor(Color.White).borderRadius(20).layoutWeight(1).alignItems(HorizontalAlign.Start)
   }
   @Builder
+  homeEntry(title: string, subtitle: string, symbol: Resource, camera: boolean) {
+    Column({space:8}) {
+      this.icon(symbol,26)
+      Text(title).fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK)
+      Text(subtitle).fontSize(this.readableSize(11)).fontColor(SUB)
+    }.padding({top:15,bottom:15,left:4,right:4}).layoutWeight(1).border({width:{right:camera?0:0.5},color:CareTheme.line})
+      .onClick(()=>{if (camera) {router.pushUrl({url:'pages/Camera'});} else {this.navigate(3);}})
+  }
+  @Builder
   overview() {
     Column() {
-      Row() { Column({ space: 5 }) { Text('鸿颐安 · 居家守护').fontSize(this.readableSize(13)).fontColor(SUB); Text(this.careName + '的居家守护').fontSize(this.readableSize(27)).fontWeight(FontWeight.Bold).fontColor(INK) }.alignItems(HorizontalAlign.Start); Blank(); Stack() { Circle().fill('#E6F2EF').width(46).height(this.elderMode ? 60 : 46); this.icon($r('app.media.user'),26) }.onClick(() => { this.navigate(4); }) }.width('100%').margin({ top: 12, bottom: 20 })
-      Row({ space: 6 }) { this.pill({ text: this.demo ? '本地演示' : this.simulated ? '模拟后端' : '真实设备', color: this.demo || this.simulated ? AMBER : TEAL, background: this.demo || this.simulated ? '#FFF3DE' : '#E8F5F1' }); Text(this.demo ? '演示数据，不代表真实监测' : 'TX-SMART-R · HomeSafety').fontSize(this.readableSize(11)).fontColor(SUB); Blank() }.width('100%').margin({ bottom: 14 })
-      Column({ space: 16 }) {
-        Row() { this.icon($r('app.media.shield_white'),32); Blank(); Text(this.demo ? '演示中' : this.online ? '云端在线' : '状态待确认').fontSize(this.readableSize(12)).fontColor('#BBDCD7') }.width('100%')
-        Text(this.assessment().title).fontSize(this.readableSize(25)).fontWeight(FontWeight.Bold).fontColor(Color.White).width('100%')
-        Text(this.assessment().reason).fontSize(this.readableSize(12)).fontColor('#BBD0D5').width('100%')
-        Row() { Circle().fill(this.online ? '#76D7AD' : '#D6B770').width(6).height(6); Text(this.age()).fontSize(this.readableSize(11)).fontColor('#D5E4E7').margin({ left: 6 }); Blank(); Text(this.loading ? '查询中…' : '查询 ↻').fontSize(this.readableSize(12)).fontColor(Color.White).onClick(() => { this.refresh(true); }) }.width('100%')
-      }.padding(22).backgroundColor(this.assessment().level === 'alert' ? '#873F40' : '#183C47').borderRadius(24).width('100%').onClick(()=>{this.navigate(this.assessment().level==='alert'?1:3);})
-      if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%').backgroundColor('#FFF0EB').borderRadius(12).margin({ top: 12 }) }
+      Row() { Column({ space: 5 }) { Text('颐鸿安').fontSize(this.readableSize(26)).fontWeight(FontWeight.Medium).fontColor(PRIMARY); Text(this.careName + '的居家守护').fontSize(this.readableSize(13)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank(); Stack() { Circle().fill(CareTheme.softBlue).width(46).height(this.elderMode ? 60 : 46); this.icon($r('app.media.brand_mark'),32) }.onClick(() => { this.navigate(4); }) }.width('100%').margin({ top: 12, bottom: 20 })
+      Column({ space: 10 }) {
+        Row() { this.icon($r('app.media.shield_white'),25); Blank(); Text(this.demo ? '演示中' : this.online ? '云端在线' : '状态待确认').fontSize(this.readableSize(12)).fontColor('#E3EDF8') }.width('100%')
+        Text(this.demo ? '日常守护，一目了然' : this.assessment().title).fontSize(this.readableSize(21)).fontWeight(FontWeight.Bold).fontColor(Color.White).width('100%')
+        Text(this.demo ? '查看家中环境、活动与生活提醒' : this.assessment().reason).fontSize(this.readableSize(12)).fontColor('#DBE6F1').width('100%')
+        Row() { Circle().fill(this.online ? CareTheme.apricot : CareTheme.apricot).width(6).height(6); Text(this.age()).fontSize(this.readableSize(11)).fontColor('#DBE6F1').margin({ left: 6 }); Blank(); Text(this.loading ? '更新中…' : '刷新').fontSize(this.readableSize(12)).fontColor(Color.White).onClick(() => { this.refresh(true); }) }.width('100%')
+      }.padding(18).backgroundColor(this.assessment().level === 'alert' ? '#963D40' : PRIMARY).borderRadius(18).width('100%').onClick(()=>{this.navigate(this.assessment().level==='alert'?1:3);})
+      Row({space:10}) {
+        this.homeEntry('居家守护', '主机与房间', $r('app.media.home'), false)
+        this.homeEntry('随身健康', '手表与活动', $r('app.media.activity'), false)
+        this.homeEntry('家中画面', '一键连接', $r('app.media.camera'), true)
+      }.width('100%').backgroundColor(Color.White).borderRadius(16).margin({top:16,bottom:4})
+      if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%').backgroundColor(CareTheme.warmSurface).borderRadius(12).margin({ top: 12 }) }
       Row({space:14}) {
-        Stack() { Rect().fill('#EAF5F1').width(44).height(this.elderMode ? 60 : 44).radius(14); this.icon($r('app.media.home'),26) }
+        Stack() { Rect().fill(CareTheme.softBlue).width(44).height(this.elderMode ? 60 : 44).radius(14); this.icon($r('app.media.home'),26) }
         Column({space:5}) { Text('房门').fontSize(this.readableSize(16)).fontWeight(FontWeight.Medium).fontColor(INK); Text(this.demo?'演示状态':this.stale()?'等待设备重新上报':'随设备上报更新').fontSize(this.readableSize(10)).fontColor(SUB).maxLines(1) }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         Blank()
-        Text(this.roomDoor()).fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(!this.demo&&(this.stale()||!this.healthFresh()||this.doorValid===0)?SUB:this.doorValue===1?AMBER:TEAL).constraintSize({maxWidth:160}).textAlign(TextAlign.End)
+        Text(this.roomDoor()).fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(!this.demo&&(this.stale()||!this.healthFresh()||this.doorValid===0)?SUB:this.doorValue===1?AMBER:PRIMARY).constraintSize({maxWidth:160}).textAlign(TextAlign.End)
       }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20).margin({top:14})
       this.livingCard()
       this.section({ title: '实时环境', subtitle: this.stale() ? '上报已过期' : '每 2 秒查询云端' })
       Row({ space: 12 }) {
-        this.metric({ icon: $r('app.media.thermometer'), label: '室内温度', value: this.number(this.temp, '°', 1), caption: this.healthFresh() && !this.envValid ? '温度传感器不可用' : this.temp === -999 ? '暂无有效读数' : '摄氏度 · ℃', tint: this.healthFresh() && !this.envValid ? AMBER : TEAL })
-        this.metric({ icon: $r('app.media.droplet'), label: '空气湿度', value: this.number(this.humi, '%', 1), caption: this.humi === -999 ? '暂无有效读数' : '相对湿度 · RH', tint: TEAL })
+        this.metric({ icon: $r('app.media.thermometer'), label: '室内温度', value: this.number(this.temp, '°', 1), caption: this.healthFresh() && !this.envValid ? '温度传感器不可用' : this.temp === -999 ? '暂无有效读数' : '摄氏度 · ℃', tint: this.healthFresh() && !this.envValid ? AMBER : PRIMARY })
+        this.metric({ icon: $r('app.media.droplet'), label: '空气湿度', value: this.number(this.humi, '%', 1), caption: this.humi === -999 ? '暂无有效读数' : '相对湿度 · RH', tint: PRIMARY })
       }.width('100%')
-      Row({ space: 12 }) { this.metric({ icon: $r('app.media.flame'), label: '燃气读数', value: this.number(this.gas, ''), caption: '传感器估算 · ppm', tint: TEAL }); this.metric({ icon: $r('app.media.sun'), label: '环境光照', value: this.number(this.light, ''), caption: '照度 · lx', tint: TEAL }) }.width('100%').margin({ top: 12 })
+      Row({ space: 12 }) { this.metric({ icon: $r('app.media.flame'), label: '燃气读数', value: this.number(this.gas, ''), caption: '传感器估算 · ppm', tint: PRIMARY }); this.metric({ icon: $r('app.media.sun'), label: '环境光照', value: this.number(this.light, ''), caption: '照度 · lx', tint: PRIMARY }) }.width('100%').margin({ top: 12 })
       this.assessmentCard()
       this.section({ title: '居家动态', subtitle: '设备观察状态' })
-      Row({ space: 14 }) { this.icon($r('app.media.activity'),28); Column({ space: 5 }) { Text(this.stale() ? '活动数据已过期' : this.body < 0 ? '等待活动数据' : this.body === 1 ? '检测到活动' : '暂未检测到活动').fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(INK); Text(this.inactive < 0 ? '等待设备上报 · PIR 感应' : `距上次活动 ${this.inactive} 秒 · PIR 感应`).fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({ text: '固定式居家监测', color: TEAL, background: '#E9F6F3' }) }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(18)
+      Row({ space: 14 }) { this.icon($r('app.media.activity'),28); Column({ space: 5 }) { Text(this.stale() ? '活动数据已过期' : this.body < 0 ? '等待活动数据' : this.body === 1 ? '检测到活动' : '暂未检测到活动').fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(INK); Text(this.inactive < 0 ? '等待设备上报 · PIR 感应' : `距上次活动 ${this.inactive} 秒 · PIR 感应`).fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({ text: '固定式居家监测', color: PRIMARY, background: CareTheme.softBlue }) }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(18)
       this.section({ title: '快速处理', subtitle: '执行结果以设备回执为准' })
       this.controls()
       this.section({ title: '今日活动', subtitle: 'PIR 活动次数' })
       this.chart(false)
-      Text('鸿颐安 · 让关心及时抵达').fontSize(this.readableSize(11)).fontColor('#A1AFB5').margin({ top: 24, bottom: 20 })
+      Text('颐鸿安 · 让关心及时抵达').fontSize(this.readableSize(11)).fontColor('#A1AFB5').margin({ top: 24, bottom: 20 })
     }.width('100%')
   }
   @Builder
   livingCard() {
     Column({space:14}) {
-      Row() { Text('生活提醒').fontSize(this.readableSize(17)).fontWeight(FontWeight.Bold).fontColor(INK);Blank();Text('设置').fontSize(this.readableSize(13)).fontColor(TEAL).onClick(()=>{this.openLiving();}) }.width('100%')
+      Row() { Rect().width(4).height(18).fill(CareTheme.apricot).radius(2).margin({right:8}); Text('生活提醒').fontSize(this.readableSize(17)).fontWeight(FontWeight.Bold).fontColor(INK);Blank();Text('设置').fontSize(this.readableSize(13)).fontColor(PRIMARY).onClick(()=>{this.openLiving();}) }.width('100%')
       Row({space:12}) {
         this.icon($r('app.media.sun'),25)
         Column({space:4}) { Text('自动夜灯').fontSize(this.readableSize(14)).fontColor(INK);Text('低照度自动点亮 · 报警优先').fontSize(this.readableSize(10)).fontColor(SUB) }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(12)).fontColor(TEAL).constraintSize({maxWidth:130}).textAlign(TextAlign.End)
+        Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(12)).fontColor(PRIMARY).constraintSize({maxWidth:130}).textAlign(TextAlign.End)
       }.width('100%')
       Divider().color('#EDF2F3')
       Row() {Text('每日服药提醒').fontSize(this.readableSize(14)).fontColor(INK);Blank();Text(this.living&&this.living.schema===2?'最多三个时段':'单次提醒 · 旧版设备').fontSize(this.readableSize(10)).fontColor(SUB)}.width('100%')
@@ -683,16 +737,16 @@ struct Index {
           this.icon($r('app.media.bell'),22)
           Column({space:4}) {
             Text('第 '+(slot.slot+1)+' 时段 · '+medicineTime(slot.minute)).fontSize(this.readableSize(13)).fontColor(INK)
-            Text(slotLabel(slot,this.living?this.living.time_synced:false,this.livingFresh())).fontSize(this.readableSize(12)).fontColor(slot.state===3?AMBER:TEAL)
+            Text(slotLabel(slot,this.living?this.living.time_synced:false,this.livingFresh())).fontSize(this.readableSize(12)).fontColor(slot.state===3?AMBER:PRIMARY)
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
           if(slot.enabled && (slot.state===3||slot.state===4) && this.livingFresh()) {
-            Button(slot.state===4?'改为未服药':'确认已服药').fontSize(this.readableSize(11)).height(34).backgroundColor(slot.state===4?'#EDF4F3':TEAL).fontColor(slot.state===4?TEAL:'#FFFFFF').enabled(!this.livingBusy&&!this.commandBusy&&(slot.state!==4||(this.living!==null&&this.living.schema===2))).onClick(()=>{this.askMedicine(slot);})
+            Button(slot.state===4?'改为未服药':'确认已服药').fontSize(this.readableSize(11)).height(34).backgroundColor(slot.state===4?CareTheme.softBlue:PRIMARY).fontColor(slot.state===4?PRIMARY:'#FFFFFF').enabled(!this.livingBusy&&!this.commandBusy&&(slot.state!==4||(this.living!==null&&this.living.schema===2))).onClick(()=>{this.askMedicine(slot);})
           }
         }.width('100%')
       },(slot:MedicineSlot)=>slot.slot+':'+slot.minute+':'+slot.enabled+':'+slot.state+':'+this.livingFresh())
       if(!this.living){Text('等待设备生活提醒状态').fontSize(this.readableSize(12)).fontColor(SUB)}
       if(this.livingMessage) {Text(this.livingMessage).fontSize(this.readableSize(11)).fontColor(AMBER).width('100%')}
-    }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20).margin({top:14})
+    }.padding(18).width('100%').backgroundColor(CareTheme.warmSurface).borderRadius(16).margin({top:14})
   }
   @Builder
   livingSheet() {
@@ -700,11 +754,11 @@ struct Index {
       Column({space:18}) {
         Row() { Text('生活提醒设置').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK);Blank();Text('关闭').fontColor(SUB).onClick(()=>{if(!this.livingBusy){this.livingOpen=false;}}) }.width('100%')
         Text(this.demo?'本地演示设置，不操作真实设备':'设置保存在板子，重启保留；以设备回执为准').fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
-        Row() {Column({space:5}) {Text('自动夜灯').fontColor(INK);Text('低于 30 lx 开灯，高于 60 lx 关灯').fontSize(this.readableSize(11)).fontColor(SUB)}.alignItems(HorizontalAlign.Start);Blank();Toggle({type:ToggleType.Switch,isOn:this.nightDraft}).selectedColor(TEAL).enabled(!this.livingBusy).onChange((value:boolean)=>{this.nightDraft=value;})}.width('100%')
+        Row() {Column({space:5}) {Text('自动夜灯').fontColor(INK);Text('低于 30 lx 开灯，高于 60 lx 关灯').fontSize(this.readableSize(11)).fontColor(SUB)}.alignItems(HorizontalAlign.Start);Blank();Toggle({type:ToggleType.Switch,isOn:this.nightDraft}).selectedColor(PRIMARY).enabled(!this.livingBusy).onChange((value:boolean)=>{this.nightDraft=value;})}.width('100%')
         Text('每日最多三个时段 · 北京时间 UTC+8').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
         ForEach(this.medicineDrafts,(draft:MedicineDraft)=>{
           Column({space:10}) {
-            Row() {Text('第 '+(draft.slot+1)+' 时段').fontColor(INK);Blank();Toggle({type:ToggleType.Switch,isOn:draft.enabled}).selectedColor(TEAL).enabled(!this.livingBusy).onChange((value:boolean)=>{this.updateMedicineDraft(draft.slot,value);})}.width('100%')
+            Row() {Text('第 '+(draft.slot+1)+' 时段').fontColor(INK);Blank();Toggle({type:ToggleType.Switch,isOn:draft.enabled}).selectedColor(PRIMARY).enabled(!this.livingBusy).onChange((value:boolean)=>{this.updateMedicineDraft(draft.slot,value);})}.width('100%')
             Row({space:12}) {
               TextInput({text:draft.hour,placeholder:'08'}).type(InputType.Number).maxLength(2).layoutWeight(1).height(this.elderMode ? 60 : 46).enabled(!this.livingBusy).onChange((value:string)=>{this.updateMedicineDraft(draft.slot,undefined,value);})
               Text(':').fontSize(this.readableSize(23)).fontColor(INK)
@@ -715,16 +769,16 @@ struct Index {
         Text('按已有医嘱设置。到时板端蜂鸣提醒，前台 App 弹出提醒；可分别确认或撤销当天状态。确认不代表自动检测到实际服药。').fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
         if(this.living&&this.living.schema===1){Text('当前设备仅支持一个时段；升级固件后可设置三个。').fontSize(this.readableSize(12)).fontColor(AMBER)}
         if(this.livingMessage) {Text(this.livingMessage).fontSize(this.readableSize(12)).fontColor(AMBER).width('100%')}
-        Button(this.livingBusy?'等待设备确认…':'保存到设备').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(TEAL).enabled(!this.livingBusy&&!this.commandBusy).onClick(()=>{this.saveLiving();})
+        Button(this.livingBusy?'等待设备确认…':'保存到设备').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(PRIMARY).enabled(!this.livingBusy&&!this.commandBusy).onClick(()=>{this.saveLiving();})
         Text('服药历史').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
         if(this.medicineHistoryMessage){Text(this.medicineHistoryMessage).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')}
         if(this.medicineHistory.length===0&&!this.medicineHistoryMessage){Text('暂无已上报的服药记录').fontSize(this.readableSize(12)).fontColor(SUB).width('100%')}
         ForEach(this.medicineHistory.slice(0,12),(record:MedicineRecord)=>{
-          Text(new Date(record.dose_day*86400000).toISOString().slice(0,10)+' · 第 '+(record.slot+1)+' 时段 '+medicineTime(record.minute)+' · '+(record.state===4?'已服药':'未服药')).fontSize(this.readableSize(12)).fontColor(record.state===4?TEAL:AMBER).width('100%')
+          Text(new Date(record.dose_day*86400000).toISOString().slice(0,10)+' · 第 '+(record.slot+1)+' 时段 '+medicineTime(record.minute)+' · '+(record.state===4?'已服药':'未服药')).fontSize(this.readableSize(12)).fontColor(record.state===4?PRIMARY:AMBER).width('100%')
         },(record:MedicineRecord)=>record.dose_day+':'+record.slot+':'+record.medicine_revision+':'+record.state)
 
       }.padding(22).width('100%')
-    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(24).scrollBar(BarState.Off)
+    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(18).scrollBar(BarState.Off)
   }
   @Builder
   medicineSheet() {
@@ -734,14 +788,14 @@ struct Index {
       Text(this.demo?'演示提醒，不操作真实设备':'已到每日提醒时间，请根据实际情况确认。').fontSize(this.readableSize(14)).fontColor(SUB)
       Text('确认仅记录一次用户操作，无法证明已经实际服药。').fontSize(this.readableSize(12)).fontColor(SUB)
       if(this.livingMessage){Text(this.livingMessage).fontSize(this.readableSize(12)).fontColor(AMBER)}
-      Button(this.livingBusy?'等待设备回执…':'确认已服药').width('100%').height(this.elderMode ? 60 : 46).backgroundColor(TEAL).enabled(!this.livingBusy&&!this.commandBusy&&this.livingFresh()).onClick(()=>{this.confirmMedicine();})
-      Button('稍后处理').width('100%').height(this.elderMode ? 60 : 42).backgroundColor('#EDF4F3').fontColor(TEAL).enabled(!this.livingBusy).onClick(()=>{this.medicineNotice=false;})
-    }.padding(24).width('90%').backgroundColor(Color.White).borderRadius(24)
+      Button(this.livingBusy?'等待设备回执…':'确认已服药').width('100%').height(this.elderMode ? 60 : 46).backgroundColor(PRIMARY).enabled(!this.livingBusy&&!this.commandBusy&&this.livingFresh()).onClick(()=>{this.confirmMedicine();})
+      Button('稍后处理').width('100%').height(this.elderMode ? 60 : 42).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).enabled(!this.livingBusy).onClick(()=>{this.medicineNotice=false;})
+    }.padding(24).width('90%').backgroundColor(Color.White).borderRadius(18)
   }
   @Builder
   controls() {
     Row({ space: 12 }) {
-      Button(this.commandBusy ? '操作进行中…' : '确认设备报警').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(Color.White).backgroundColor(TEAL).height(this.elderMode ? 60 : 46).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy).onClick(() => { this.command('ack'); })
+      Button(this.commandBusy ? '操作进行中…' : '确认设备报警').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(Color.White).backgroundColor(PRIMARY).height(this.elderMode ? 60 : 46).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy).onClick(() => { this.command('ack'); })
       Button(this.healthFresh() && this.muted ? '设备已消音' : '设备消音').fontSize(this.readableSize(14)).fontColor(INK).backgroundColor('#E7EDF0').height(this.elderMode ? 60 : 46).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy).onClick(() => { this.command('mute'); })
     }.width('100%')
     if (!this.demo && (!this.online || this.stale())) { Text('设备离线或上报过期，远程操作可能无法送达，请联系现场人员。').fontSize(this.readableSize(12)).fontColor(AMBER).lineHeight(this.readableLine(20)).width('100%').margin({top:9}) }
@@ -751,9 +805,9 @@ struct Index {
   @Builder
   chart(large: boolean) {
     Column({ space: 14 }) {
-      Row() { Column({ space: 4 }) { Text(this.activityTotal.toString()).fontSize(this.readableSize(32)).fontWeight(FontWeight.Bold).fontColor(INK); Text('已观察活动次数').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({ text: this.demo ? '演示曲线' : '仅观察时段', color: TEAL, background: '#E9F6F3' }) }.width('100%')
+      Row() { Column({ space: 4 }) { Text(this.activityTotal.toString()).fontSize(this.readableSize(32)).fontWeight(FontWeight.Bold).fontColor(INK); Text('已观察活动次数').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({ text: this.demo ? '演示曲线' : '仅观察时段', color: PRIMARY, background: CareTheme.softBlue }) }.width('100%')
       if (this.hours.length) {
-        Row({ space: 3 }) { ForEach(this.hours, (value: number, index: number) => { Column() { Blank(); Rect().fill(index === Math.floor((this.now / 3600000 + 8) % 24) ? '#183C47' : '#63BFB1').width('100%').height(Math.max(3, value / this.chartMax() * (large ? 150 : 85))).radius(3) }.height(large ? 160 : 96).layoutWeight(1) }, (value: number, index: number) => `${index}:${value}`) }.width('100%').alignItems(VerticalAlign.Bottom)
+        Row({ space: 3 }) { ForEach(this.hours, (value: number, index: number) => { Column() { Blank(); Rect().fill(index === Math.floor((this.now / 3600000 + 8) % 24) ? PRIMARY : '#8EADD0').width('100%').height(Math.max(3, value / this.chartMax() * (large ? 150 : 85))).radius(3) }.height(large ? 160 : 96).layoutWeight(1) }, (value: number, index: number) => `${index}:${value}`) }.width('100%').alignItems(VerticalAlign.Bottom)
         Row() { Text('00:00').fontSize(this.readableSize(9)).fontColor(SUB); Blank(); Text('06:00').fontSize(this.readableSize(9)).fontColor(SUB); Blank(); Text('12:00').fontSize(this.readableSize(9)).fontColor(SUB); Blank(); Text('18:00').fontSize(this.readableSize(9)).fontColor(SUB); Blank(); Text('23:00').fontSize(this.readableSize(9)).fontColor(SUB) }.width('100%')
       } else { Text('暂无可用统计，请等待设备上报').fontSize(this.readableSize(13)).fontColor(SUB).padding({ top: 30, bottom: 30 }) }
     }.padding(18).backgroundColor(Color.White).borderRadius(20).width('100%')
@@ -763,13 +817,13 @@ struct Index {
     Column() {
       this.pageTitle('报警中心', '每一次异常，都值得及时回应')
       Row({ space: 10 }) { this.summary({ label: '事件记录', value: this.alarms.length.toString() }); this.summary({ label: '仍在报警', value: this.pendingCount().toString() }); this.summary({ label: '统计报警', value: this.alarmTotal.toString() }) }.width('100%')
-      Row({ space: 10 }) { Button('全部事件').fontSize(this.readableSize(12)).backgroundColor(this.alarmFilter===0?INK:'#E6EDF0').fontColor(this.alarmFilter===0?'#FFFFFF':SUB).onClick(()=>{this.alarmFilter=0;}); Button('正在报警').fontSize(this.readableSize(12)).backgroundColor(this.alarmFilter===1?INK:'#E6EDF0').fontColor(this.alarmFilter===1?'#FFFFFF':SUB).onClick(()=>{this.alarmFilter=1;}); Blank(); Text('刷新 ↻').fontSize(this.readableSize(13)).fontColor(TEAL).onClick(()=>{this.refresh(true);}) }.width('100%').margin({ top: 20, bottom: 14 })
+      Row({ space: 10 }) { Button('全部事件').fontSize(this.readableSize(12)).backgroundColor(this.alarmFilter===0?INK:'#E6EDF0').fontColor(this.alarmFilter===0?'#FFFFFF':SUB).onClick(()=>{this.alarmFilter=0;}); Button('正在报警').fontSize(this.readableSize(12)).backgroundColor(this.alarmFilter===1?INK:'#E6EDF0').fontColor(this.alarmFilter===1?'#FFFFFF':SUB).onClick(()=>{this.alarmFilter=1;}); Blank(); Text('刷新 ↻').fontSize(this.readableSize(13)).fontColor(PRIMARY).onClick(()=>{this.refresh(true);}) }.width('100%').margin({ top: 20, bottom: 14 })
       if (!this.alarms.length) { this.empty('暂无报警记录', this.demo ? '当前演示中没有新增事件' : '尚未收到报警事件；历史只包含已接收并保存的记录') }
       ForEach(this.alarms.filter((item: AlarmEvent) => this.alarmFilter===0 || this.eventActive(item)), (item: AlarmEvent) => {
         Column({ space: 12 }) {
-          Row({ space: 10 }) { this.icon($r('app.media.bell'),22); Text(alarmTitle(item.code)).fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); this.pill({ text: this.eventLabel(item), color: this.eventActive(item)?RED:TEAL, background: this.eventActive(item)?'#FFF0EC':'#EAF6F1' }) }.width('100%')
+          Row({ space: 10 }) { this.icon($r('app.media.bell'),22); Text(alarmTitle(item.code)).fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); this.pill({ text: this.eventLabel(item), color: this.eventActive(item)?RED:PRIMARY, background: this.eventActive(item)?CareTheme.alarmSurface:CareTheme.softBlue }) }.width('100%')
           Text(alarmTime(item)).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
-          Row() { Text(item.duration ? `持续 ${item.duration} 秒` : '查看事件详情与处理备注').fontSize(this.readableSize(12)).fontColor(SUB); Blank(); Text('查看详情  ›').fontSize(this.readableSize(12)).fontColor(TEAL) }.width('100%')
+          Row() { Text(item.duration ? `持续 ${item.duration} 秒` : '查看事件详情与处理备注').fontSize(this.readableSize(12)).fontColor(SUB); Blank(); Text('查看详情  ›').fontSize(this.readableSize(12)).fontColor(PRIMARY) }.width('100%')
         }.padding(18).backgroundColor(Color.White).borderRadius(18).width('100%').margin({ bottom: 12 }).onClick(()=>{this.navigate(1);this.showAlarm(item);})
       }, (item: AlarmEvent)=>`${alarmKey(item)}:${item.phase}:${item.duration}:${item.epoch}:${this.eventLabel(item)}`)
       this.section({ title: '远程操作', subtitle: '' })
@@ -800,47 +854,81 @@ struct Index {
   @Builder
   devicePage() {
     Column() {
-      this.pageTitle('设备与连接', '状态透明，守护才更安心')
+      this.pageTitle('家庭设备', this.familyMessage)
+      Column({space:8}) {
+        Text('一处牵挂，多端相伴').fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(PRIMARY).width('100%')
+        Text('主机守护居家，星闪连接房间与随身健康。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
+        if (this.familyRole) { Text(this.familyRole==='owner'?'家庭管理员':this.familyRole==='viewer'?'只读成员':'照护成员').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%') }
+        ForEach(this.familyNodes, (node: FamilyNode) => {
+          Column({space:6}) {
+            Row() { Text(node.name).fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text(node.room).fontSize(this.readableSize(12)).fontColor(SUB) }.width('100%')
+            Text(node.kind==='wearable'?'随身健康节点':node.kind==='nearlink'?'星闪分布节点':'居家安全主机').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%')
+            if (node.kind==='nearlink') {
+              if (node.properties) {
+                Text('光照 '+(node.properties.light===undefined?'待更新':node.properties.light)+'  ·  烟雾 '+(node.properties.smoke===undefined?'待更新':node.properties.smoke)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+                Text('人体 '+(node.properties.body===undefined?'待更新':node.properties.body===1?'检测到活动':'未检测到活动')+'  ·  房门 '+(node.properties.door==='OPEN'?'开':node.properties.door==='CLOSED'?'关':'待更新')).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+                Text('上报时间 '+(node.updated_at || '待确认')).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
+              } else { Text('等待节点实际属性上报').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
+            }
+            if (node.watch) {
+              Text('心率 '+(node.watch.heart_rate===null?'待测':node.watch.heart_rate+' 次/分')+'  ·  血氧 '+(node.watch.spo2===null?'待测':node.watch.spo2+'%')).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+              Text('采集时间 '+node.watch.received_at).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
+            } else if (node.kind==='wearable') { Text('等待手表上报，不显示模拟健康值').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
+          }.padding({top:14,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line}).width('100%')
+        }, (node: FamilyNode) => node.device_id)
+        if (!this.familyNodes.length) { Text('家庭设备清单尚未加载').fontSize(this.readableSize(13)).fontColor(SUB).padding({top:12,bottom:12}) }
+        Button('查看摄像头实时画面 ›').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{router.pushUrl({url:'pages/Camera'});})
+      }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(16).width('100%').margin({bottom:18})
       Column({space:14}) {
-        Row({space:14}) { Stack() { Rect().fill('#ECF5F2').width(54).height(this.elderMode ? 60 : 54).radius(18); this.icon($r('app.media.device'),30) }; Column({space:5}) { Text('通晓 TX-SMART-R').fontSize(this.readableSize(17)).fontWeight(FontWeight.Bold).fontColor(INK); Text('OpenHarmony · 居家安全终端').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank() }.width('100%')
-        this.info({ label: '数据环境', value: this.demo?'本地演示':this.simulated?'模拟后端':'真实设备', color: this.demo||this.simulated?AMBER:TEAL })
-        this.info({ label: '云端设备', value: this.online?'在线':'离线或待确认', color: this.online?TEAL:AMBER })
-        this.info({ label: '推送连接', value: this.demo?'演示模式':!this.loggedIn?'未登录':this.pushOnline?'已连接':'未连接 · 前台轮询备用', color: this.pushOnline?TEAL:SUB })
+        Row({space:14}) { Stack() { Rect().fill(CareTheme.softBlue).width(54).height(this.elderMode ? 60 : 54).radius(18); this.icon($r('app.media.device'),30) }; Column({space:5}) { Text('通晓 TX-SMART-R').fontSize(this.readableSize(17)).fontWeight(FontWeight.Bold).fontColor(INK); Text('OpenHarmony · 居家安全终端').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start); Blank() }.width('100%')
+        this.info({ label: '数据环境', value: this.demo?'本地演示':this.simulated?'模拟后端':'真实设备', color: this.demo||this.simulated?AMBER:PRIMARY })
+        this.info({ label: '云端设备', value: this.online?'在线':'离线或待确认', color: this.online?PRIMARY:AMBER })
+        this.info({ label: '推送连接', value: this.demo?'演示模式':!this.loggedIn?'未登录':this.pushOnline?'已连接':'未连接 · 前台轮询备用', color: this.pushOnline?PRIMARY:SUB })
         this.info({ label: '设备固件', value: this.firmware||'等待健康消息', color: INK })
-        this.info({ label: '温湿度', value: !this.healthFresh()?'健康状态待确认':this.envValid?'读数有效':'读数无效 · 请检查', color: this.healthFresh()&&this.envValid?TEAL:AMBER })
+        this.info({ label: '温湿度', value: !this.healthFresh()?'健康状态待确认':this.envValid?'读数有效':'读数无效 · 请检查', color: this.healthFresh()&&this.envValid?PRIMARY:AMBER })
         this.info({ label: '人体跌倒检测', value: '未开启 · 需独立穿戴设备', color: SUB })
         this.info({ label: '板端传输', value: this.demo?'演示状态':!this.healthFresh()?'状态待更新':this.fwTls?'MQTT + TLS':'普通 MQTT', color: INK })
         this.info({ label: '设备上报', value: this.age(), color: INK })
-      }.padding(18).backgroundColor(Color.White).borderRadius(22).width('100%')
+      }.padding(18).backgroundColor(Color.White).borderRadius(18).width('100%')
       this.section({ title: '连接管理', subtitle: '' })
-      Button(this.loggedIn?'修改后端连接':'连接后端服务').width('100%').height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(TEAL).borderRadius(14).onClick(()=>{this.openConnection();})
+      Button(this.loggedIn?'修改后端连接':'连接后端服务').width('100%').height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(PRIMARY).borderRadius(14).onClick(()=>{this.openConnection();})
       if (this.loggedIn) { Button('退出登录并返回演示').width('100%').height(45).fontSize(this.readableSize(13)).fontColor(SUB).backgroundColor('#E8EEF0').borderRadius(14).margin({top:10}).onClick(()=>{this.disconnect();}) }
-      Column({space:8}) { Text('AP 与 STA').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('STA：开发板连接热点后上云，本 App 通过后端访问。AP：开发板开启 HomeSafety 热点，可直接通过浏览器访问 192.168.2.1:8080/status。两种模式由板上长按 K5 切换。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)); Text('App 不使用开发板设备密钥登录 MQTT，不会抢占开发板连接。').fontSize(this.readableSize(11)).fontColor(TEAL).lineHeight(this.readableLine(20)) }.padding(18).backgroundColor('#EAF2F1').borderRadius(18).margin({top:18})
+      Column({space:8}) { Text('AP 与 STA').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('STA：开发板连接热点后上云，本 App 通过后端访问。AP：开发板开启 HomeSafety 热点，可直接通过浏览器访问 192.168.2.1:8080/status。两种模式由板上长按 K5 切换。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)); Text('App 不使用开发板设备密钥登录 MQTT，不会抢占开发板连接。').fontSize(this.readableSize(11)).fontColor(PRIMARY).lineHeight(this.readableLine(20)) }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(18).margin({top:18})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%') }
-      Text('鸿颐安 1.3.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
+      Text('颐鸿安 1.6.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
     }.width('100%')
   }
   @Builder
   assessmentCard() {
     Column({space:12}) {
-      Row() { Text('守护建议').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); this.pill({text:this.assessment().level==='normal'?'监测正常':this.assessment().level==='alert'?'优先查看':'状态说明',color:this.assessmentColor(),background:'#F0F6F4'}) }.width('100%')
+      Row() { Text('守护建议').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); this.pill({text:this.assessment().level==='normal'?'监测正常':this.assessment().level==='alert'?'优先查看':'状态说明',color:this.assessmentColor(),background:CareTheme.softBlue}) }.width('100%')
       Text(this.assessment().title).fontSize(this.readableSize(18)).fontWeight(FontWeight.Medium).fontColor(this.assessmentColor()).width('100%')
       Text(this.assessment().advice).fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)).width('100%')
-      Row() { Text('依据：报警 · 数据时效 · 传感器可用性').fontSize(this.readableSize(10)).fontColor(SUB); Blank(); Text('查看 ›').fontSize(this.readableSize(12)).fontColor(TEAL).onClick(()=>{this.navigate(this.assessment().level==='alert'?1:3);}) }.width('100%')
+      Row() { Text('依据：报警 · 数据时效 · 传感器可用性').fontSize(this.readableSize(10)).fontColor(SUB); Blank(); Text('查看 ›').fontSize(this.readableSize(12)).fontColor(PRIMARY).onClick(()=>{this.navigate(this.assessment().level==='alert'?1:3);}) }.width('100%')
     }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20).margin({top:16})
   }
   @Builder
   userPage() {
     Column() {
       this.pageTitle('我的守护', '把关心，变成日常的陪伴')
+      if (this.loggedIn && this.familyRole==='owner') {
+        Column({space:10}) {
+          Text('邀请家人一起守护').fontSize(18).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
+          TextInput({text:this.memberName,placeholder:'新账号：3～32 位字母、数字或下划线'}).onChange((v:string)=>{this.memberName=v;})
+          TextInput({text:this.memberPassword,placeholder:'初始密码：至少 8 位'}).type(InputType.Password).onChange((v:string)=>{this.memberPassword=v;})
+          Row() { Text('只查看，不控制设备').fontSize(14).fontColor(SUB);Blank();Toggle({type:ToggleType.Switch,isOn:this.memberReadOnly}).onChange((v:boolean)=>{this.memberReadOnly=v;}) }.width('100%')
+          Button(this.memberBusy?'正在创建…':'创建家庭成员').enabled(!this.memberBusy).backgroundColor(PRIMARY).width('100%').onClick(()=>{this.addMember();})
+          if (this.memberMessage) { Text(this.memberMessage).fontSize(12).fontColor(SUB).width('100%') }
+        }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%').margin({bottom:16})
+      }
       Column({space:18}) {
         Row({space:14}) {
-          Stack() { Circle().fill('#E2F3ED').width(62).height(62); this.icon($r('app.media.user'),33) }
+          Stack() { Circle().fill(CareTheme.softBlue).width(62).height(62); this.icon($r('app.media.user'),33) }
           Column({space:6}) { Text(this.displayName).fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(INK); Text(this.loggedIn?'已登录 · '+this.accountName:'体验用户 · 本地演示').fontSize(this.readableSize(12)).fontColor(SUB) }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          Text('编辑 ›').fontSize(this.readableSize(13)).fontColor(TEAL).onClick(()=>{this.editProfile();})
+          Text('编辑 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY).onClick(()=>{this.editProfile();})
         }.width('100%')
-        Row() { Column({space:5}) { Text('关怀对象').fontSize(this.readableSize(11)).fontColor(SUB); Text(this.careName).fontSize(this.readableSize(17)).fontWeight(FontWeight.Medium).fontColor(INK) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({text:this.demo?'演示模式':this.online?'设备在线':'连接待确认',color:this.demo?AMBER:this.online?TEAL:SUB,background:'#EDF6F3'}) }.width('100%')
-      }.padding(22).width('100%').backgroundColor(Color.White).borderRadius(24)
+        Row() { Column({space:5}) { Text('关怀对象').fontSize(this.readableSize(11)).fontColor(SUB); Text(this.careName).fontSize(this.readableSize(17)).fontWeight(FontWeight.Medium).fontColor(INK) }.alignItems(HorizontalAlign.Start); Blank(); this.pill({text:this.demo?'演示模式':this.online?'设备在线':'连接待确认',color:this.demo?AMBER:this.online?PRIMARY:SUB,background:CareTheme.softBlue}) }.width('100%')
+      }.padding(22).width('100%').backgroundColor(Color.White).borderRadius(18)
       this.assessmentCard()
       this.section({title:'显示与易用性',subtitle:'按使用者习惯选择'})
       Column({space:12}) {
@@ -849,7 +937,7 @@ struct Index {
             Text('老年人模式').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK)
             Text('放大文字与主要操作按钮').fontSize(this.readableSize(12)).fontColor(SUB)
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          Toggle({type:ToggleType.Switch,isOn:this.elderMode}).selectedColor(TEAL)
+          Toggle({type:ToggleType.Switch,isOn:this.elderMode}).selectedColor(PRIMARY)
             .enabled(!this.elderModeSaving).onChange((value:boolean)=>{this.setElderMode(value);})
         }.width('100%')
         Text('只调整本机显示，不改变报警规则、服药计划或其他家属的设置。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%')
@@ -857,20 +945,20 @@ struct Index {
       }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
       this.section({title:'提醒与联系',subtitle:'按你的习惯守护'})
       Column({space:4}) {
-        Row() { Column({space:6}) { Text('前台报警弹窗').fontSize(this.readableSize(14)).fontColor(INK); Text(this.alarmReminders?'收到报警后提醒，点击进入详情':'弹窗已关闭，报警仍会记录').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start).layoutWeight(1); Toggle({type:ToggleType.Switch,isOn:this.alarmReminders}).selectedColor(TEAL).onChange((value:boolean)=>{this.setReminders(value);}) }.width('100%').padding({top:10,bottom:12})
+        Row() { Column({space:6}) { Text('前台报警弹窗').fontSize(this.readableSize(14)).fontColor(INK); Text(this.alarmReminders?'收到报警后提醒，点击进入详情':'弹窗已关闭，报警仍会记录').fontSize(this.readableSize(11)).fontColor(SUB) }.alignItems(HorizontalAlign.Start).layoutWeight(1); Toggle({type:ToggleType.Switch,isOn:this.alarmReminders}).selectedColor(PRIMARY).onChange((value:boolean)=>{this.setReminders(value);}) }.width('100%').padding({top:10,bottom:12})
         this.info({label:'联系电话',value:this.contactPhone||'尚未填写',color:this.contactPhone?INK:SUB})
         Text('资料仅保存在此设备。App 关闭或进入后台后，当前版本不保证系统通知送达；没有弹窗不代表没有报警。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(19)).width('100%').padding({top:8,bottom:4})
-        if (this.demo) { Button('体验报警提醒').width('100%').height(this.elderMode ? 60 : 42).fontSize(this.readableSize(13)).backgroundColor('#EAF5F1').fontColor(TEAL).borderRadius(12).margin({top:8}).onClick(()=>{this.previewAlert();}) }
+        if (this.demo) { Button('体验报警提醒').width('100%').height(this.elderMode ? 60 : 42).fontSize(this.readableSize(13)).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).borderRadius(12).margin({top:8}).onClick(()=>{this.previewAlert();}) }
       }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
       this.section({title:'账户与帮助',subtitle:''})
       Column() {
-        Row() { Text('账户与连接').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text(this.loggedIn?'管理 ›':'登录 ›').fontSize(this.readableSize(13)).fontColor(TEAL) }.width('100%').padding({top:16,bottom:16}).onClick(()=>{this.openConnection();})
+        Row() { Text('账户与连接').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text(this.loggedIn?'管理 ›':'登录 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY) }.width('100%').padding({top:16,bottom:16}).onClick(()=>{this.openConnection();})
         Row() { Text('查看设备状态').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text('›').fontSize(this.readableSize(18)).fontColor(SUB) }.width('100%').padding({top:16,bottom:16}).border({width:{top:0.5},color:'#EEF2F3'}).onClick(()=>{this.navigate(3);})
-        this.info({label:'应用版本',value:'鸿颐安 1.2.1',color:INK})
+        this.info({label:'应用版本',value:'颐鸿安 1.2.1',color:INK})
         Text('守护建议用于解释监测状态，不提供个人健康评分或诊断。报警需结合现场核实，确认处理与设备消音含义不同。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%').padding({top:12,bottom:8})
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(20)
-      if (this.loggedIn) { Button('退出登录').width('100%').height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor('#FBEDEA').borderRadius(14).margin({top:20}).onClick(()=>{this.disconnect();}) }
-      Text('鸿颐安 · 让关心及时抵达').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:20})
+      if (this.loggedIn) { Button('退出登录').width('100%').height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(CareTheme.alarmSurface).borderRadius(14).margin({top:20}).onClick(()=>{this.disconnect();}) }
+      Text('颐鸿安 · 让关心及时抵达').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:20})
     }.width('100%')
   }
   @Builder
@@ -886,15 +974,15 @@ struct Index {
         Text('联系电话（可选）').fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
         TextInput({text:this.contactDraft,placeholder:'方便核实时联系'}).height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).maxLength(24).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.contactDraft=value;})
         if(this.profileError){Text(this.profileError).fontSize(this.readableSize(12)).fontColor(RED).width('100%')}
-        Button(this.profileSaving?'正在保存…':'保存资料').height(this.elderMode ? 60 : 46).width('100%').backgroundColor(TEAL).borderRadius(14).enabled(!this.profileSaving).onClick(()=>{this.saveProfile();})
+        Button(this.profileSaving?'正在保存…':'保存资料').height(this.elderMode ? 60 : 46).width('100%').backgroundColor(PRIMARY).borderRadius(14).enabled(!this.profileSaving).onClick(()=>{this.saveProfile();})
       }.padding(24).width('100%')
-    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(24).scrollBar(BarState.Off)
+    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(18).scrollBar(BarState.Off)
   }
   @Builder
   incomingSheet() {
     Column({space:18}) {
       Column({space:12}) {
-        Stack() { Circle().fill('#FBEAE6').width(60).height(60); this.icon($r('app.media.bell'),32) }
+        Stack() { Circle().fill(CareTheme.alarmSurface).width(60).height(60); this.icon($r('app.media.bell'),32) }
         Text(this.demo?'演示报警提醒':this.alertQueue.length&&this.alertQueue[0].epoch>0&&this.now-this.alertQueue[0].epoch*1000>120000?'报警记录待核实':'收到设备报警').fontSize(this.readableSize(13)).fontColor(RED)
         Text(this.alertQueue.length?alarmTitle(this.alertQueue[0].code):'设备报警').fontSize(this.readableSize(26)).fontWeight(FontWeight.Bold).fontColor(INK).textAlign(TextAlign.Center)
         Text(this.careName+'的居家终端，请及时查看并联系现场核实。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(22)).textAlign(TextAlign.Center)
@@ -908,7 +996,7 @@ struct Index {
   }
   @Builder
   navItem(index: number, icon: Resource, title: string) {
-    Column({space:5}) { Image(icon).width(22).height(22).opacity(this.tab===index?1:0.45); Text(title).fontSize(this.readableSize(10)).fontWeight(this.tab===index?FontWeight.Bold:FontWeight.Normal).fontColor(this.tab===index?TEAL:SUB) }.height(this.elderMode ? 60 : 54).justifyContent(FlexAlign.Center).layoutWeight(1).onClick(()=>{this.navigate(index);})
+    Column({space:5}) { Image(icon).width(22).height(22).opacity(this.tab===index?1:0.72); Text(title).fontSize(this.readableSize(11)).fontWeight(this.tab===index?FontWeight.Bold:FontWeight.Normal).fontColor(this.tab===index?PRIMARY:SUB) }.height(this.elderMode ? 60 : 54).justifyContent(FlexAlign.Center).layoutWeight(1).backgroundColor(this.tab===index?CareTheme.softBlue:Color.Transparent).borderRadius(12).margin({left:3,right:3}).onClick(()=>{this.navigate(index);})
   }
   @Builder
   settingsSheet() {
@@ -916,14 +1004,14 @@ struct Index {
       Row() { Text('连接后端').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).onClick(()=>{this.settingsOpen=false;this.passwordDraft='';}) }.width('100%')
       Text('登录后查询真实设备；不会把云账号密钥放进 App。').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
       TextInput({text:this.serverDraft,placeholder:'https://backend.example.com'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.serverDraft=value;})
-      Text('使用公网服务器地址').fontSize(this.readableSize(12)).fontColor(TEAL).width('100%').onClick(()=>{this.serverDraft='https://backend.example.com';})
+      Text('使用公网服务器地址').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%').onClick(()=>{this.serverDraft='https://backend.example.com';})
       TextInput({text:this.userDraft,placeholder:'用户名'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.userDraft=value;})
       if (this.loggedIn) { Text('本次登录密码可点右侧眼睛查看；退出或重启后清除。').fontSize(this.readableSize(11)).fontColor(SUB).width('100%') }
       TextInput({text:this.passwordDraft,placeholder:'后端登录密码'}).type(InputType.Password).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.passwordDraft=value;})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).width('100%') }
-      Button(this.loginBusy?'正在登录…':'登录并同步').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(TEAL).borderRadius(14).enabled(!this.loginBusy&&this.passwordDraft.length>0).onClick(()=>{this.login();})
+      Button(this.loginBusy?'正在登录…':'登录并同步').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(PRIMARY).borderRadius(14).enabled(!this.loginBusy&&this.passwordDraft.length>0).onClick(()=>{this.login();})
       Text('公网服务器使用上方 IP 地址；登录后同步真实设备。USB 演示可改填 https://127.0.0.1:18443，并运行电脑端演示连接脚本。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(19))
-    }.padding(24).width('94%').backgroundColor(Color.White).borderRadius(24)
+    }.padding(24).width('94%').backgroundColor(Color.White).borderRadius(18)
   }
   @Builder
   alarmSheet() {
@@ -931,29 +1019,29 @@ struct Index {
     Column({space:14}) {
       Row() { Text(this.selected?alarmTitle(this.selected.code):'事件详情').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).onClick(()=>{this.closeAlarm();}) }.width('100%')
       Text(this.selected?alarmTime(this.selected):'').fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
-      this.pill({text:this.selected?this.eventLabel(this.selected):'事件详情',color:this.selected&&this.eventActive(this.selected)?RED:TEAL,background:'#F4F7F8'})
+      this.pill({text:this.selected?this.eventLabel(this.selected):'事件详情',color:this.selected&&this.eventActive(this.selected)?RED:PRIMARY,background:'#F4F8F7'})
       if (this.selected && this.selected.code === 4) { Text('设备上报长时间未检测到活动。可能与静坐、睡眠、离开感应范围或突发意外有关，不能据此确认跌倒。请先联系老人，必要时安排现场查看；远程消音不能代替核实。').fontSize(this.readableSize(13)).fontColor(AMBER).lineHeight(this.readableLine(22)).width('100%') }
       Text('当前终端操作：确认或消音不会删除这条事件记录。').fontSize(this.readableSize(11)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
       this.controls()
       Text('处理备注').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
       ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}：${note.note}`).fontSize(this.readableSize(12)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
-      Row({space:8}) { Button('已处理').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='handled'?TEAL:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='false_alarm'?TEAL:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='follow_up'?TEAL:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
+      Row({space:8}) { Button('已处理').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='handled'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='false_alarm'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(11)).backgroundColor(this.resolution==='follow_up'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
       Text('先选择处置结果，再点击“保存处理记录”。成功后关闭详情；只保存这条事件的处理说明，不解除设备报警。').fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
       TextArea({text:this.noteDraft,placeholder:'可选：补充联系家属、现场查看等处理情况…'}).maxLength(2000).enabled(!this.noteSaving).height(90).fontSize(this.readableSize(13)).backgroundColor(BG).onChange((value:string)=>{this.noteDraft=value;})
-      Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 44).width('100%').backgroundColor(TEAL).enabled(!this.noteSaving&&this.selected!==null).onClick(()=>{this.saveNote();})
-      if(this.noteMessage){Text(this.noteMessage).fontSize(this.readableSize(12)).fontColor(this.noteMessage.indexOf('失败')>=0?RED:TEAL).width('100%')}
+      Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 44).width('100%').backgroundColor(PRIMARY).enabled(!this.noteSaving&&this.selected!==null).onClick(()=>{this.saveNote();})
+      if(this.noteMessage){Text(this.noteMessage).fontSize(this.readableSize(12)).fontColor(this.noteMessage.indexOf('失败')>=0?RED:PRIMARY).width('100%')}
       if (this.demo) { Text('演示操作不会发送到真实设备').fontSize(this.readableSize(11)).fontColor(AMBER) }
     }.padding(22).width('100%')
-    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(24).scrollBar(BarState.Off)
+    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(18).scrollBar(BarState.Off)
   }
   build() {
     Stack({alignContent:Alignment.Center}) {
       Column() {
-        if (this.demo || this.simulated) { Text(this.demo?'演示环境 · 所有数据仅用于展示':'模拟后端 · 非真实设备数据').fontSize(this.readableSize(10)).fontColor('#98712E').width('100%').textAlign(TextAlign.Center).padding({top:5,bottom:5}).backgroundColor('#FFF3DE') }
+        if (this.demo || this.simulated) { Text(this.demo?'演示环境 · 所有数据仅用于展示':'模拟后端 · 非真实设备数据').fontSize(this.readableSize(10)).fontColor(CareTheme.warmInk).width('100%').textAlign(TextAlign.Center).padding({top:5,bottom:5}).backgroundColor(CareTheme.warmSurface) }
         Scroll(this.pageScroller) {
           Column() { if(this.tab===0){this.overview()} else if(this.tab===1){this.alarmsPage()} else if(this.tab===2){this.trendsPage()} else if(this.tab===3){this.devicePage()} else {this.userPage()} }.padding({left:20,right:20,bottom:24}).width('100%')
         }.layoutWeight(1).scrollBar(BarState.Off).width('100%')
-        Row() { this.navItem(0,$r('app.media.home'),'总览'); this.navItem(1,$r('app.media.bell'),'报警'); this.navItem(2,$r('app.media.chart'),'趋势'); this.navItem(3,$r('app.media.device'),'设备'); this.navItem(4,$r('app.media.user'),'我的') }.width('100%').padding({left:12,right:12,top:4,bottom:12}).backgroundColor(Color.White).border({width:{top:0.5},color:'#E5ECEF'})
+        Row() { this.navItem(0,$r('app.media.home'),'总览'); this.navItem(1,$r('app.media.bell'),'报警'); this.navItem(2,$r('app.media.chart'),'趋势'); this.navItem(3,$r('app.media.device'),'设备'); this.navItem(4,$r('app.media.user'),'我的') }.width('100%').padding({left:12,right:12,top:4,bottom:12}).backgroundColor(Color.White).border({width:{top:0.5},color:CareTheme.line})
       }.width('100%').height('100%').backgroundColor(BG).padding({top:28,bottom:18})
       if (this.settingsOpen || this.profileOpen || this.livingOpen || this.selected!==null) {
         Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.loginBusy&&!this.profileSaving&&!this.livingBusy&&!this.noteSaving){this.noteOperation++;this.livingOpen=false;this.settingsOpen=false;this.profileOpen=false;this.selected=null;this.passwordDraft='';}})
