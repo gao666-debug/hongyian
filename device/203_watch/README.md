@@ -1,139 +1,140 @@
-# 203_watch —— WS63 手表扩展模块
+# 手表 · 说明（WS63 穿戴节点）
 
-在 WS63（HiSilicon，RISC-V + LiteOS）上，把 `200_lcd_display`、`201_accelerometers`、
-`202_heart_rate_oximetry_sensor` 三个官方 demo 合成一个可穿戴节点：1.28″ 圆屏 +
-MPU6050 + MAX3010x，**一个固件、一个入口、两条任务**，并把手环数据上报到华为云 IoTDA。
+> 板子：**WS63 星闪开发板** + **WEAR 扩展板**（1.28″ 圆屏 + MPU6050 六轴 + MAX3010x 心率血氧）
+> 用途：心率 / 血氧 / 计步 / 跌倒检测，穿戴在被监护人身上
+> 固件：`203_watch`（`src/hy_sensor_main.c` 为入口）
 
-## 当前状态
+---
 
-| 部分 | 状态 | 说明 |
-| --- | --- | --- |
-| 编译 / 打包 / 烧录 | 通 | `tools/` 一键脚本，串口 `COM10` |
-| GC9A01 圆屏 240×240 | 通 | `lcd_bringup.c` 固定引脚初始化，SPI 提速 |
-| MPU6050 加速度 | 通 | I2C1 @0x68/0x69，±8g（4096 LSB/g），100 Hz |
-| MAX3010x 心率血氧 | 通 | @0x57，200 Hz；静息心率 53~60 bpm，42 窗 39 有效 |
-| 计步 | 通 | 模长过零判定，1.3g 抬脚 / 0.8g 落地，250 ms 去抖 |
-| 摔倒检测 | 通 | 冲击 ≥2 g → 5 s 静置 → 疑似摔倒，6 个场景实测符合预期 |
-| 华为云上云 | 通 | WiFi → DHCP → SNTP → MQTT 1883 → 每 10 s 属性上报 |
-| 血氧 SpO2 | 参考 | 93~100%，未单独标定，只能看趋势 |
+## 一、源码（`src/`，26 个文件）
 
-上云的参数、坑和验收清单见 [`docs/上云接入说明.md`](docs/上云接入说明.md)；
-传感器与屏的全部排查结论见 [`docs/传感器与上云开发纪要.md`](docs/传感器与上云开发纪要.md)。
+| 文件组 | 职责 |
+|---|---|
+| `hy_sensor_main.c` | 应用入口，任务编排 |
+| `hy_sensor.c/h`、`algorithm.c/h` | 采样、跌倒判定算法 |
+| `bsp_mpu6050.c/h` | 六轴加速度 |
+| `bsp_max30102*.c/h`、`bsp_max30102_blood.c/h` | 心率 / 血氧 |
+| `bsp_iic.c/h` | I2C 总线 |
+| `hy_net.c/h` | WiFi 连接 |
+| `hy_mqtt.c/h` | MQTT 客户端 |
+| `hy_cloud.c/h` | 华为云上报（属性上报组包） |
+| `hy_cloud_cfg.example.h` | **配置模板**（真实配置 `hy_cloud_cfg.h` 不入库，含密钥） |
+| `hy_sha256.c/h` | 华为云 clientId 的 HMAC-SHA256 校验 |
+| `board_check.c/h` | 整板上电自检（引脚三态、I2C、短路图、LCD 扫描） |
 
-## 硬件映射
+配置项与真实值对照：
 
-| 外设 | 接口 | 引脚 |
-| --- | --- | --- |
-| 1.28″ 圆屏 GC9A01 240×240 | 软 SPI | SCL=IO7 MOSI=IO9 DC=IO10 CS=IO11 RST=IO12 |
-| MPU6050 加速度计 | I2C1 @0x68 | SCL=IO16 SDA=IO15 |
-| MAX3010x 心率血氧 | I2C1 @0x57 | 同上 |
-
-> `bsp_max30102.c` 虽然叫 30102，实际写入的寄存器（0x06 模式 / 0x07 SpO2 / 0x09 LED /
-> 0x02~0x04 FIFO 指针 / 0x05 FIFO 数据）全是 **MAX30100** 的地址，与原理图丝印一致，不要按 30102 的地址表改。
->
-> **传感器在 WEAR 板上，不在底板**：裸板扫描两个地址全 `ACK_ERR`（线序正常、器件不在），
-> 插上 WEAR 立刻应答。烧录时必须拔掉 WEAR，GPIO1 被拉高会进不了 ROM 下载模式。
-
-## 任务与节奏
-
-```
-hy_sensor_task (prio 20)                        hy_cloud_task (prio 16)
-  ├─ MAX3010x 200 Hz 采样，5 s 一窗算心率血氧      ├─ WiFi 关联 + DHCP + SNTP
-  ├─ MPU6050  100 Hz 采样，计步 + 摔倒状态机       ├─ MQTT 3.1.1 连接（HMAC-SHA256）
-  └─ 每 1 s 打印一行状态                          └─ 每 10 s 上报 8 个属性，摔倒立刻补报
-                     hy_lcd_task (prio 24)
-                       └─ LCD 局部刷新，5 s 一帧
+```c
+// 照 hy_cloud_cfg.example.h 复制一份命名为 hy_cloud_cfg.h，然后填真实值
+#define HY_HW_DEVICE_ID    "demo-watch"
+#define HY_HW_SERVICE_ID   "11"
+#define HY_WIFI_SSID       "你的WiFi"
+#define HY_WIFI_PASS       "你的密码"
+#define HY_HW_DEVICE_SECRET "控制台给的设备密钥"
 ```
 
-采样用 `uapi_tcxo_get_ms()` 做绝对时标对齐，不用 `osal_mdelay` 累加，避免漂移到
-`algorithm.h` 的 `FS=200` 之外导致心率算错。
+> ⚠️ 本包**只有 `hy_cloud_cfg.example.h`（模板）**，没有真实配置。
+> 注意 `HY_HW_DEVICE_ID` 末尾的 `_DEVICE_ID` 是模板占位符照抄留下的，
+> **云端和固件必须完全一致**，不要单方面改成"好看的名字"（详见 `../01_总览/` 第六节说明）。
 
-## 摔倒判定
+---
 
-```
-冲击 ≥ 2000 mg           → FALL_WATCH（观察 500 ms 回弹期）
-回弹期结束后 5 s 内
-  模长峰峰 ≤ 300 mg       → FALL_ALARM（疑似摔倒，fall_state=2，fall_count+1）
-  出现 ≥ 600 mg 的活动    → 作废（坐下、放桌上、拍桌子都会被排除）
-```
-
-判定为摔倒后每 5 s 复报一次，直到有人把板子拿起来（活动量回升）才回到 0。
-手机/云端看到的是 `fall_state`（此刻状态）和 `fall_count`（上电以来累计次数）两个属性。
-
-## 上云报文
-
-```json
-{"services":[{"service_id":"11","properties":{
-  "heart_rate":60,"spo2":100,
-  "accel_x":-188,"accel_y":-168,"accel_z":951,
-  "steps":2,"fall_state":0,"fall_count":0}}]}
-```
-
-- 加速度单位 **mg**（1000 = 1 g），服务 ID 必须与产品物模型逐字一致；
-- `heart_rate` / `spo2` 为 0 表示这次没测到（手指没贴上），不是真实读数。
-
-## 编译
+## 二、编译
 
 ```bash
-# 0. 配置（必做）：凭据不进仓库
-cp src/hy_cloud_cfg.example.h src/hy_cloud_cfg.h   # 填 WiFi 与设备三元组
-
-# 1. SDK 里只留 203 这个 demo（避免多个 app_run）
-#    src/build/config/target_config/ws63/menuconfig/acore/ws63_liteos_app.config
-#    CONFIG_SAMPLE_SUPPORT_203_WATCH=y
-#    demo/CMakeLists.txt 白名单：hy_sensor_main|hy_sensor|hy_net|hy_mqtt|hy_sha256|hy_cloud|...
-
-# 2. 增量编译（脚本已含"先删 libsamples.a"，别用 -c 全量）
+export SDK_ROOT=/d/ws63_dev/fbb_ws63-master   # 默认是 /d/ws/src，按本机改
+export PYTHON=/d/ws63_dev/tools/python311/python.exe
 sh tools/build.sh
 ```
 
-产物：`src/output/ws63/fwpkg/ws63-liteos-app/ws63-liteos-app_all.fwpkg`
-
-`HONGYIAN_LCD_ONLY=ON` 可以只编圆屏点亮测试（`lcd_only_main.c`），不碰 I2C。
-
-## 烧录与抓日志
+### ⚠️ 关键：每次编译前必须删 `libsamples.a`
 
 ```bash
-python tools/pack_fw.py                                   # 打成本仓库的 .fwpkg
-python tools/flash.py COM10 6 <fwpkg> 3600                # 拔掉 WEAR，按 RST 进 ROM 下载模式
-python tools/capture.py COM10 60 boot.log                 # 抓 60 秒，端口掉线会自动重开
-python tools/watch_boot.py COM10 1800 boot.log            # 常驻等开机，抓到横幅后再录 75 秒
+rm -f $SDK_ROOT/src/application/samples/libsamples.a
 ```
 
-## 上云自检（PC 端，先于烧板子）
+原因：demo 目录的白名单只决定「编译哪些 `.c`」，**旧的 `.obj` 会留在静态库里**。
+换过入口文件后如果不删，镜像里会出现**两个 `app_run`**，跑起来是旧应用，
+表现为"烧录成功但屏幕/功能不对"。这个坑踩过多次。
+
+另外两个通用约束（与环境节点相同）：
+- 编译不能带 hso（`-nhso`）
+- 输出不能接 `| tee`（会死锁）
+
+---
+
+## 三、烧录
 
 ```bash
-python tools/hw_iotda_probe.py <域名> <设备ID> <密钥> [服务ID]   # 三元组 + 上报是否被接受
-python tools/hw_iotda_shadow.py <域名> <设备ID> <密钥>           # 查设备影子，看平台到底存了什么
+python tools/flash.py COM6 6 240        # 端口 / 段号 / 超时秒数
 ```
 
-## 已知坑
+流程是 ROM 握手 → YMODEM 传 loaderboot → 逐段写镜像。
 
-1. **`build.sh` 的 `-c` 全量模式会卡死在 `ar.exe`**：app 构建与 flashboot 子构建抢同一棵
-   `output\ws63`。绕法：先 `build.py -nhso -c ws63-flashboot`，再增量编 app。
-2. **并发度太高也会挂**：`ninja -j20` 时最后一批 gcc 零 CPU 卡住，`-j8` 正常。
-3. **换入口文件必须删 `libsamples.a`**：白名单只决定"编译哪些 .c"，旧 `.obj` 还在库里，
-   会出现两个 `app_run`、镜像跑错应用。
-4. **IO0~IO5 是 QSPI0 主 Flash 总线**，写成 GPIO 会直接硬 fault（取指失败）。
-5. **明文 1883 强制校验时间戳**：ClientId 里带 `YYYYMMDDHH`(UTC)，所以必须先 SNTP 再连 MQTT。
-6. **服务 ID 写错 = 平台静默丢弃**：连接不断、控制台仍"在线"，但物模型没有数据。
-   用设备影子反查是最快的定位方式。
+### ⚠️ 烧录时必须拔掉 WEAR 扩展板
 
-## 文件
+GPIO1 被 WEAR 板拉高就**进不了 ROM 下载模式**，必须先拔。
+烧完再插回去。
 
-| 文件 | 来源 |
-| --- | --- |
-| `hy_sensor_main.c` | 入口：创建传感器任务、LCD 任务、上云任务 |
-| `hy_sensor.c` / `hy_sensor.h` | MPU6050 + MAX3010x 采样、心率算法、计步、摔倒状态机 |
-| `hy_net.c` / `hy_net.h` | WiFi 初始化/关联、DHCP、SNTP，含 lwip 内存池自检 |
-| `hy_mqtt.c` / `hy_mqtt.h` | 手写 MQTT 3.1.1 客户端（CONNECT/PUBLISH/PINGREQ） |
-| `hy_sha256.c` / `hy_sha256.h` | SHA-256 / HMAC-SHA256，华为云设备签名用 |
-| `hy_cloud.c` / `hy_cloud.h` | 三元组、属性上报、断线重连 |
-| `hy_cloud_cfg.example.h` | 上云参数模板（复制成 `hy_cloud_cfg.h` 后填写，不进仓库） |
-| `lcd_bringup.c` / `lcd_bringup.h` | 圆屏固定引脚初始化 |
-| `bsp_iic.c` / `bsp_iic.h` | 拷自 `202`（`201` 那份有运算符优先级 bug） |
-| `algorithm.c` / `algorithm.h` | 拷自 `202`，`FS` 改为 200 |
-| `main.c` `watch_ui.c` `watch_sensor.c` `board_check.c` | 早期整板调试版，保留参考，不在默认构建里 |
-| `bsp_mpu6050.c/h` `bsp_max30102*.c/h` | 拷自 `201`/`202`，未参与编译，仅作参考 |
+`docs/圆屏固定引脚测试_给队友.md` 里有相应的引脚扫描方法。
 
-本目录不含 SDK、不含固件二进制，按上面的步骤自行构建。
+---
+
+## 四、引脚
+
+### 圆屏（WEAR 板 `LCD1` 座，7 针直插，不可改线）
+
+| 屏脚 | 网络 | WS63 引脚 |
+|---|---|---|
+| 1 | VCC | 挂板电源（模组背面自带 LDO） |
+| 2 | GND | — |
+| 3 | SPI0CK | **IO7** |
+| 4 | SPI0MOSI | **IO9** |
+| 5 | DC | **IO10** |
+| 6 | SPI0CS | **IO11** |
+| 7 | RST | **IO12** |
+
+> 以 `docs/圆屏固定引脚测试_给队友.md` 为准（`docs/硬件与引脚.md` 前半部分是已被推翻的历史推断）。
+
+### 传感器（I2C）
+
+| 器件 | 总线 | 引脚 |
+|---|---|---|
+| MPU6050（六轴） | I2C | J3-1 = SCL，J3-2 = SDA |
+| MAX3010x（心率血氧） | I2C | 同上（同一条总线） |
+
+EXB 底板还有三个单针测试点：`J6-1 = IO3`、`J7-1 = IO7`、`J8-1 = IO9`。
+
+---
+
+## 五、上报
+
+| 项 | 值 |
+|---|---|
+| device_id | `demo-watch` |
+| 产品 ID | `6ae6a5c1e094d615927efdbd`（产品名 `22`） |
+| **service_id** | **`11`** |
+| 上报频率 | **10 秒** |
+| 上报通路 | **只有属性上报** `properties/report` → 后端 `resource=device.property` |
+
+完整报文样例、字段单位（`accel_x/y/z` 是 **mg**，`heart_rate=0` 表示没测到）
+见 `../01_总览/系统总览与设备清单.md` 第 3.3 节。
+
+> 注意：手表**不发自定义消息**，所以后端必须支持 `device.property` 才能收它的数据
+> （后端 1.4.0 已支持）。
+
+---
+
+## 六、命令下发：不支持
+
+手表只上报，不订阅命令 Topic。App 上不要给它做「立即测量」这类按钮。
+
+---
+
+## 七、已知问题
+
+| 问题 | 状态 |
+|---|---|
+| **GC9A01 圆屏未点亮**（背光亮、画面全灰、控制器不应答） | ❌ 未解决。排查停在「时钟脚到底是哪一个」，详见 `docs/点亮排查记录.md` |
+| 心率/血氧为 0 | 正常现象，表示手指没贴到传感器，不是故障 |
+| `steps` / `fall_count` 重启归零 | 设计如此，历史统计要用后端的小时桶 |

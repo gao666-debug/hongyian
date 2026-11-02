@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from . import watch as watch_model
-
 
 def json_numbers(value):
     """Convert SDK Decimal property values before SQLite/JSON serialization."""
@@ -24,7 +22,6 @@ class HuaweiCloud:
         from huaweicloudsdkcore.region.region import Region
         from huaweicloudsdkcore.http.http_config import HttpConfig
         from huaweicloudsdkiotda.v5 import IoTDAClient
-        self.settings = settings
         credentials = BasicCredentials(settings.ak,settings.sk,settings.project_id)
         credentials.with_derived_predicate(DerivedCredentials.get_default_derived_predicate())
         config = HttpConfig()
@@ -43,40 +40,47 @@ class HuaweiCloud:
                 status = None
         except Exception as exc:
             raise CloudError('IoTDA shadow request failed') from exc
-        services = raw.get('shadow',[])
-        # 主板和手表挂在同一个设备下时会有两条 service：先找主板，再退回手表。
-        service = next((s for s in services if s.get('service_id')==self.settings.service_id),None)
-        if service is None:
-            service = watch_model.pick_service(services,self.settings.watch_service_id)
-        if service is None:
-            service = {}
-        report = service.get('reported') or {}
-        stamp = report.get('event_time')
+        # 多设备（2026-11-02）：不同产品的物模型服务 ID 不同 ——
+        # 主监护板是 HomeSafety，WS63 星闪环境节点是 11（华为云产品 33）。
+        # 旧逻辑只挑 HomeSafety，导致新设备影子明明有属性却返回空对象，
+        # 前端读 shadow.properties 会整屏空白。
+        # 现在：优先 HomeSafety（主监护板行为逐字节不变），没有时才合并其余服务的属性。
+        services = raw.get('shadow') or []
+
+        def reported_props(service):
+            return (service.get('reported') or {}).get('properties') or {}
+
+        preferred = next((s for s in services
+                          if s.get('service_id') == 'HomeSafety' and reported_props(s)), None)
+        if preferred is not None:
+            chosen = preferred
+            properties = dict(reported_props(preferred))
+            # 属性取自哪个服务，时间就取哪个服务的，避免「旧属性配新时间」自相矛盾
+            stamp = (preferred.get('reported') or {}).get('event_time')
+        else:
+            chosen = next((s for s in services if reported_props(s)), {})
+            properties = {}
+            for service in services:
+                properties.update(reported_props(service))
+            # 合并模式下时间取所有有属性服务里最新的。
+            # 时间格式固定为 YYYYMMDDTHHMMSSZ，字典序即时间序。
+            stamps = [(s.get('reported') or {}).get('event_time') for s in services
+                      if reported_props(s) and (s.get('reported') or {}).get('event_time')]
+            stamp = max(stamps) if stamps else (chosen.get('reported') or {}).get('event_time')
         if stamp:
             try:
                 stamp = datetime.strptime(stamp,'%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc).isoformat().replace('+00:00','Z')
             except ValueError:
                 pass
-        properties = json_numbers(report.get('properties') or {})
-        data = {'device_id':device,'service_id':service.get('service_id',self.settings.service_id),
+        return {'device_id':device,'service_id':chosen.get('service_id') or 'HomeSafety',
                 'online':True if status=='ONLINE' else False if status=='OFFLINE' else None,
-                'updated_at':stamp,'properties':properties}
-        if service.get('service_id') != self.settings.service_id:
-            # 手表：额外给一份归一化结果，App 不用自己换算 mg -> g
-            data['kind'] = 'watch'
-            try:
-                data['watch'] = watch_model.normalize(properties,
-                                                      service_id=data['service_id'],
-                                                      received_at=stamp)
-            except watch_model.WatchReportError:
-                data['watch'] = None
-        return data
+                'updated_at':stamp,'properties':json_numbers(properties)}
 
     def command(self, device, name, paras=None):
         from huaweicloudsdkiotda.v5 import CreateCommandRequest, DeviceCommandRequest
         try:
             raw = self.client.create_command(CreateCommandRequest(device_id=device,
-                  body=DeviceCommandRequest(service_id=self.settings.service_id,command_name=name,paras=paras or {}))).to_dict()
+                  body=DeviceCommandRequest(service_id='HomeSafety',command_name=name,paras=paras or {}))).to_dict()
         except Exception as exc:
             raise CloudError('IoTDA command outcome unknown') from exc
         response = raw.get('response')
