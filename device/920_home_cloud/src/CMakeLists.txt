@@ -1,0 +1,15 @@
+set(SOURCES
+    "${SOURCES}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/main.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sensors.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/net.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/iotda.c"
+    PARENT_SCOPE)
+
+set(PUBLIC_HEADER
+    "${PUBLIC_HEADER}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cfg.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sensors.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/net.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/iotda.h"
+    PARENT_SCOPE)
