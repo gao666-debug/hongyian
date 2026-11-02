@@ -15,6 +15,7 @@ class Settings:
     device_id: str = 'demo-device'
     # 手表（WS63 穿戴节点）在 IoTDA 里是另一台直连设备，可能和主板不同 ID。
     # 留空表示手表与主板共用 device_id。
+    nearlink_device_id: str = ''
     watch_device_id: str = ''
     # 产品物模型里的服务 ID。主板是 HomeSafety，手表是产品自定义的那个（本产品是 "11"）。
     service_id: str = 'HomeSafety'
@@ -36,6 +37,7 @@ class Settings:
                    password=os.getenv('APP_PASSWORD', ''),
                    webhook_token=os.getenv('WEBHOOK_TOKEN', ''),
                    device_id=os.getenv('DEVICE_ID', cls.device_id),
+                   nearlink_device_id=os.getenv('NEARLINK_A_DEVICE_ID', ''),
                    watch_device_id=os.getenv('WATCH_DEVICE_ID', ''),
                    service_id=os.getenv('IOTDA_SERVICE_ID', cls.service_id),
                    watch_service_id=os.getenv('WATCH_SERVICE_ID', cls.watch_service_id),

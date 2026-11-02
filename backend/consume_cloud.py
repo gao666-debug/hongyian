@@ -58,6 +58,8 @@ class Receiver(MessagingHandler):
             payload = notification(event.message.body)
             device = payload['notify_data']['header']['device_id']
             allowed = {self.settings.device_id}
+            if self.settings.nearlink_device_id:
+                allowed.add(self.settings.nearlink_device_id)
             if self.settings.watch_device_id:
                 allowed.add(self.settings.watch_device_id)
             if device not in allowed:

@@ -122,6 +122,8 @@ def create_app(settings=None, cloud=None):
     settings.validate()
     store = Store(settings.db)
     store.bootstrap_user(settings.username,settings.password)
+    from .households import Households
+    homes = Households(store, settings)
     provider = cloud if cloud is not None else HuaweiCloud(settings) if settings.mode=='live' else None
     hub = Hub()
     tasks = set()
@@ -132,12 +134,15 @@ def create_app(settings=None, cloud=None):
         return {'code':code,'message':message,'data':data,'request_id':uuid.uuid4().hex,
                 'mode':settings.mode,'simulated':settings.mode=='mock'}
 
-    def check_device(device):
+    def check_device(device, user=None, control=False):
         # 手表是另一台直连设备，硬件 ID 和主板不同；配了 WATCH_DEVICE_ID 才放行。
         allowed = {settings.device_id}
+        if settings.nearlink_device_id:
+            allowed.add(settings.nearlink_device_id)
         if settings.watch_device_id:
             allowed.add(settings.watch_device_id)
         if device not in allowed: raise HTTPException(404,'Device not configured')
+        if user is not None: homes.authorize(user['username'], device, control)
 
     def session(authorization: str | None = Header(default=None)):
         if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -228,6 +233,8 @@ def create_app(settings=None, cloud=None):
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws'})
 
+    homes.install(app, session, envelope)
+
     @app.post('/api/v1/auth/login')
     def login(body: Login,request: Request):
         ip = request.client.host if request.client else 'unknown'
@@ -239,7 +246,7 @@ def create_app(settings=None, cloud=None):
         token = store.login(body.username,body.password,settings.token_seconds)
         if not token: raise HTTPException(401,'Invalid username or password')
         return envelope({'access_token':token,'token_type':'Bearer','expires_in':settings.token_seconds,
-                         'username':body.username,'device_ids':[settings.device_id]})
+                         'username':body.username,'device_ids':homes.device_ids(body.username)})
 
     @app.post('/api/v1/auth/logout')
     def logout(user=Depends(session)):
@@ -248,7 +255,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/shadow')
     async def shadow(device,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         if settings.mode=='mock': data=store.doc(settings.mode,device,'shadow')
         else:
             try:
@@ -260,24 +267,24 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/health')
     def device_health(device,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope(store.doc(settings.mode,device,'health'))
 
     @app.get('/api/v1/devices/{device}/medicine/history')
     def medicine_history(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope({'items':store.list_docs(settings.mode,device,'medicine_history',limit)})
 
     @app.get('/api/v1/devices/{device}/watch')
     def watch_latest(device,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         data=store.doc(settings.mode,settings.device_id,'watch')
         if data is None: raise HTTPException(404,'No watch report yet')
         return envelope(data)
 
     @app.get('/api/v1/devices/{device}/watch/hours')
     def watch_hours(device,limit: int=Query(default=24,ge=1,le=720),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         items=store.list_docs(settings.mode,settings.device_id,'watch_hour',limit)
         for item in items:
             for name in ('hr','spo2'):
@@ -287,12 +294,13 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/watch/falls')
     def watch_falls(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope({'items':store.list_docs(settings.mode,settings.device_id,'watch_fall',limit)})
 
     @app.post('/api/v1/commands',status_code=202)
     async def commands(body: Command,user=Depends(session)):
-        check_device(body.device_id)
+        check_device(body.device_id,user,control=True)
+        if body.device_id != settings.device_id: raise HTTPException(422,"This device does not support gateway commands")
         if body.command_name in ('ack','mute') and body.paras:
             raise HTTPException(422,'ack/mute require paras:{}')
         try:
@@ -319,17 +327,21 @@ def create_app(settings=None, cloud=None):
 
     @app.post('/api/v1/ws-ticket')
     def ws_ticket(device_id: str=Query(...),user=Depends(session)):
-        check_device(device_id)
+        check_device(device_id,user)
         return envelope({'ticket':store.ticket(user['token_hash'],device_id),'expires_in':30,
                          'path':'/api/v1/ws','device_id':device_id})
 
     @app.websocket('/api/v1/ws')
     async def websocket(ws: WebSocket,device_id: str,ticket: str):
-        if device_id!=settings.device_id:
+        if device_id not in homes.configured_ids():
             await ws.close(code=4404); return
         grant = store.consume_ticket(ticket,device_id)
         if not grant or not store.session(grant['session_hash']):
             await ws.close(code=4401); return
+        try:
+            homes.authorize(store.session(grant['session_hash'])['username'],device_id)
+        except HTTPException:
+            await ws.close(code=4403); return
         await ws.accept()
         queue = asyncio.Queue(maxsize=100)
         hub.clients[device_id].add(queue)
@@ -361,9 +373,35 @@ def create_app(settings=None, cloud=None):
             await asyncio.gather(send_task,receive_task,return_exceptions=True)
             hub.clients[device_id].discard(queue)
 
+    async def ingest_nearlink(device,payload):
+        services=payload.get('services') or [payload]
+        service=next((item for item in services if isinstance(item,dict) and isinstance(item.get('properties'),dict) and any(k in item['properties'] for k in ('light','smoke','body','door'))),None)
+        if service is None: raise HTTPException(422,'No NearLink properties')
+        import math
+        props={}
+        for key,value in service['properties'].items():
+            if key in ('temp','humi','light','smoke'):
+                if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value): raise HTTPException(422,'Invalid sensor value')
+                props[key]=value
+            elif key=='body':
+                if type(value) is not int or value not in (0,1): raise HTTPException(422,'Invalid body value')
+                props[key]=value
+            elif key=='door':
+                if value not in ('OPEN','CLOSED'): raise HTTPException(422,'Invalid door value')
+                props[key]=value
+        old=store.doc(settings.mode,device,'shadow') or {'properties':{}}
+        old['properties'].update(props)
+        old.update(device_id=device,service_id=service.get('service_id',''),updated_at=utc(),online=True)
+        store.put(settings.mode,device,'shadow',old)
+        await publish(device,'properties',old)
+        return envelope({'accepted':True})
+
     async def ingest_watch(device,payload):
         """手表属性上报入库：最新值 + 小时桶 + 摔倒事件，并实时推给 App。"""
         check_device(device)
+        if device == settings.nearlink_device_id:
+            return await ingest_nearlink(device,payload)
+        source_device = device
         # 手表数据统一挂在 App 面向的那台设备下，App 不用区分两颗芯片
         device = settings.device_id
         services = payload.get('services')
@@ -378,6 +416,9 @@ def create_app(settings=None, cloud=None):
             raise HTTPException(422,'Invalid watch properties')
         previous = store.doc(settings.mode,device,'watch') or {}
         store.put(settings.mode,device,'watch',report)
+        if source_device != device:
+            store.put(settings.mode,source_device,'watch',report)
+            await publish(source_device,'watch',report)
         hour = store.watch_hour(settings.mode,device,report)
         # fall_count 只增不减，差值就是这一条上报里新增的摔倒判定
         known = previous.get('fall_count') or 0
@@ -439,11 +480,13 @@ def create_app(settings=None, cloud=None):
     @app.post('/api/v1/mock/messages')
     async def mock_message(message: DeviceMessage,device_id: str=Query(...),user=Depends(session)):
         if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
+        check_device(device_id,user,control=True)
         return await ingest(device_id,message)
 
     @app.post('/api/v1/mock/watch')
     async def mock_watch(report: WatchReport,device_id: str=Query(...),user=Depends(session)):
         if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
+        check_device(device_id,user,control=True)
         return await ingest_watch(device_id,report.model_dump())
 
     @app.post('/api/v1/iotda/notifications')
@@ -476,12 +519,12 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/alarms')
     def alarms(device,limit: int=Query(default=50,ge=1,le=100),offset: int=Query(default=0,ge=0),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope({'items':store.list_docs(settings.mode,device,'alarm',limit,offset),'limit':limit,'offset':offset})
 
     @app.post('/api/v1/devices/{device}/alarms/{event_key}/notes',status_code=201)
     def add_note(device,event_key,body: Note,user=Depends(session)):
-        check_device(device)
+        check_device(device,user,control=True)
         if not store.doc(settings.mode,device,'alarm',event_key): raise HTTPException(404,'Alarm not found')
         with store.connection() as db:
             cur=db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
@@ -490,7 +533,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
     def notes(device,event_key,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         with store.connection() as db:
             rows=db.execute('SELECT id,username,note,resolution,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id',
                             (settings.mode,device,event_key)).fetchall()
@@ -498,7 +541,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/stats')
     def stats(device,from_date: date | None=None,to_date: date | None=None,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         if from_date and to_date and from_date>to_date: raise HTTPException(422,'Invalid date range')
         days=store.list_docs(settings.mode,device,'day',1000)
         days=[d for d in days if (not from_date or d['date']>=from_date.isoformat()) and (not to_date or d['date']<=to_date.isoformat())]
