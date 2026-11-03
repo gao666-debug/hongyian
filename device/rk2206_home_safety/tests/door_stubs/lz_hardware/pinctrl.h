@@ -1,0 +1,10 @@
+typedef enum { GPIO0_PA2 = 2, GPIO0_PB0 = 8, GPIO0_PB1 = 9, GPIO0_PB6 = 14, GPIO0_PB7 = 15 } GpioID;
+typedef enum { LZGPIO_DIR_IN, LZGPIO_DIR_OUT } LzGpioDir;
+typedef enum { LZGPIO_LEVEL_LOW, LZGPIO_LEVEL_HIGH } LzGpioValue;
+typedef enum { MUX_GPIO = 0 } MuxFunc;
+typedef enum { PULL_DOWN = 2, PULL_KEEP = 3 } PullType;
+typedef enum { DRIVE_KEEP = 8 } DriveLevel;
+unsigned int LzGpioInit(GpioID id);
+unsigned int LzGpioSetDir(GpioID id, LzGpioDir dir);
+unsigned int LzGpioGetVal(GpioID id, LzGpioValue *v);
+unsigned int PinctrlSet(GpioID id, MuxFunc func, PullType pull, DriveLevel drive);

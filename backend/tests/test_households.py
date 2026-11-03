@@ -26,4 +26,12 @@ class HouseholdTests(unittest.TestCase):
                     self.assertEqual((await c.post('/api/v1/commands',headers=viewer,json={'device_id':'main','command_name':'ack','client_request_id':'1'})).status_code,403)
                     self.assertEqual((await c.get('/api/v1/devices/other/shadow',headers=viewer)).status_code,404)
                     self.assertEqual((await c.post('/api/v1/household/members',headers=viewer,json=body)).status_code,403)
+                    # Two phones use independent sessions; logging out one does not disconnect another.
+                    second=await auth('guardian','test-password')
+                    self.assertNotEqual(owner['Authorization'],second['Authorization'])
+                    self.assertEqual((await c.post('/api/v1/auth/logout',headers=owner)).status_code,200)
+                    self.assertEqual((await c.get('/api/v1/household',headers=owner)).status_code,401)
+                    self.assertEqual((await c.get('/api/v1/household',headers=second)).status_code,200)
+                    self.assertEqual((await c.get('/api/v1/household',headers=viewer)).status_code,200)
+
         asyncio.run(run())

@@ -1,0 +1,4 @@
+#ifndef TEST_STUB_NETIFAPI_H
+#define TEST_STUB_NETIFAPI_H
+
+#endif

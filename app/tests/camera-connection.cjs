@@ -1,0 +1,22 @@
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
+const ts=require(process.env.TYPESCRIPT_PATH||'F:/DevEco Studio/tools/hvigor/hvigor-ohos-plugin/node_modules/typescript');
+let code=200,body={firmware:'camera-v0.2',camera_ready:true,wifi_connected:true,ip:'192.168.1.100'},closed=0,headers;
+const network={http:{HttpProtocol:{HTTP1_1:1},RequestMethod:{GET:0},HttpDataType:{STRING:0},createHttp:()=>({request:async(url,options)=>{headers=options.header;return {responseCode:code,result:JSON.stringify(body)}},destroy:()=>{closed++}})},connection:{getDefaultNet:async()=>({}),getConnectionProperties:async()=>({linkAddresses:[]})}};
+const util={Base64Helper:class{encodeToStringSync(b){return Buffer.from(b).toString('base64')}},TextEncoder:class{encodeInto(s){return Buffer.from(s)}}};
+const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/services/CameraConnection.ets'),'utf8');
+const compiled=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+const moduleValue={exports:{}};
+vm.runInNewContext('(function(require,module,exports){'+compiled+'})',{})(name=>name==='@kit.NetworkKit'?network:{util},moduleValue,moduleValue.exports);
+(async()=>{
+ const Camera=moduleValue.exports.CameraConnection,c=new Camera();
+ assert.equal(c.normalize('192.168.1.100/'),'http://192.168.1.100');
+ for(const bad of ['javascript:alert(1)','http://user:pass@host','http://host/path','file:///tmp/a'])assert.throws(()=>c.normalize(bad));
+ assert.equal((await c.probe('192.168.1.100','user','test')).report.camera_ready,true);
+ assert.equal(headers.Authorization,' Basic '+Buffer.from('user:test').toString('base64'));
+ code=401;await assert.rejects(()=>c.probe('192.168.1.100','user','test'),/密码/);
+ code=200;body={camera_ready:true};await assert.rejects(()=>c.probe('192.168.1.100','user','test'),/不是/);
+ body={firmware:'camera-v0.2',camera_ready:false};await assert.rejects(()=>c.probe('192.168.1.100','user','test'),/排线/);
+ body={firmware:'camera-v0.2',camera_ready:true};assert.equal((await c.find('http://192.168.1.100','user','test',()=>{})).address,'http://192.168.1.100');
+ const cancelled=c.find('http://192.168.1.100','user','test',()=>{});c.cancel();await assert.rejects(()=>cancelled,/取消/);
+ assert(closed>=8);console.log('PASS camera: URL bounds, identity, authentication, readiness, discovery, cancellation, request cleanup');
+})().catch(e=>{console.error(e);process.exitCode=1});
