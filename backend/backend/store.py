@@ -110,26 +110,6 @@ class Store:
                               (mode,device,kind,limit,offset)).fetchall()
             return [{'key':r['key'], **json.loads(r['body'])} for r in rows]
 
-    def medicine_observation(self, mode, device, health, db=None):
-        """Keep reported state transitions, including physical-button changes, across restarts."""
-        if db is None:
-            with self.connection() as conn:
-                return self.medicine_observation(mode,device,health,conn)
-        life=health.get('living') or {}
-        if life.get('schema')!=2 or not life.get('time_synced') or life.get('dose_day',-1)<0:return
-        for slot in life.get('slots') or []:
-            latest_key=f"{life['dose_day']}:{slot['slot']}"
-            row=db.execute('SELECT body FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(mode,device,'medicine_latest',latest_key)).fetchone()
-            old=json.loads(row['body']) if row else None
-            revision=life['medicine_revision'];epoch=health.get('epoch',0)
-            if old and (revision<old['medicine_revision'] or revision==old['medicine_revision'] and epoch<old['epoch']):continue
-            value=dict(dose_day=life['dose_day'],slot=slot['slot'],state=slot['state'],confirmed_epoch=slot['confirmed_epoch'],minute=slot['minute'],medicine_revision=revision,epoch=epoch)
-            self.put(mode,device,'medicine_latest',value,latest_key,db)
-            if slot['state'] not in (3,4) or old and old['state']==slot['state']:continue
-            key=f"{latest_key}:{revision}:{slot['state']}"
-            if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(mode,device,'medicine_history',key)).fetchone():
-                self.put(mode,device,'medicine_history',value,key,db)
-
     def watch_hour(self, mode, device, report, db=None):
         """把手表上报按小时滚成一个桶。
 
@@ -171,6 +151,26 @@ class Store:
         bucket['fall_active'] = bool(report.get('fall_active'))
         self.put(mode, device, 'watch_hour', bucket, hour, db)
         return bucket
+
+    def medicine_observation(self, mode, device, health, db=None):
+        """Keep reported state transitions, including physical-button changes, across restarts."""
+        if db is None:
+            with self.connection() as conn:
+                return self.medicine_observation(mode,device,health,conn)
+        life=health.get('living') or {}
+        if life.get('schema')!=2 or not life.get('time_synced') or life.get('dose_day',-1)<0:return
+        for slot in life.get('slots') or []:
+            latest_key=f"{life['dose_day']}:{slot['slot']}"
+            row=db.execute('SELECT body FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(mode,device,'medicine_latest',latest_key)).fetchone()
+            old=json.loads(row['body']) if row else None
+            revision=life['medicine_revision'];epoch=health.get('epoch',0)
+            if old and (revision<old['medicine_revision'] or revision==old['medicine_revision'] and epoch<old['epoch']):continue
+            value=dict(dose_day=life['dose_day'],slot=slot['slot'],state=slot['state'],confirmed_epoch=slot['confirmed_epoch'],minute=slot['minute'],medicine_revision=revision,epoch=epoch)
+            self.put(mode,device,'medicine_latest',value,latest_key,db)
+            if slot['state'] not in (3,4) or old and old['state']==slot['state']:continue
+            key=f"{latest_key}:{revision}:{slot['state']}"
+            if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(mode,device,'medicine_history',key)).fetchone():
+                self.put(mode,device,'medicine_history',value,key,db)
 
     def command(self, command_id, mode, device=None):
         with self.connection() as db:

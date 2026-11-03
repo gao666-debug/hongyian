@@ -5,6 +5,8 @@ import { router } from '@kit.ArkUI';
 import { promptAction } from '@kit.ArkUI';
 import { CareTheme } from '../theme/CareTheme';
 import { Backend } from '../services/Backend';
+import { watchVital } from '../models/Distributed';
+import { DeviceSession } from '../services/DeviceSession';
 import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate } from '../models/Living';
 import { AlarmSnapshot, alarmStateLabel, alarmIsActive, noteText, resolutionLabel } from '../models/AlarmState';
 import { doorLabel } from '../models/DoorState';
@@ -62,7 +64,7 @@ struct Index {
       this.familyRole = family.role;
       this.familyMessage = this.familyNodes.length ? '同一家庭，分布守护' : '暂未绑定设备';
     } catch (error) {
-      if (generation === this.generation) { this.familyMessage = '家庭设备待接入 · 请更新后端'; }
+      if (generation === this.generation) { this.familyMessage = '房间与随身设备可从下方入口查看'; }
     }
   }
 
@@ -146,7 +148,7 @@ struct Index {
   @State commandBusy: boolean = false;
   @State commandMessage: string = '';
   @State refreshCount: number = 0;
-  private api: Backend = new Backend();
+  private api: Backend = DeviceSession.backend;
   private inbox: AlarmInbox = new AlarmInbox();
   private pageScroller: Scroller = new Scroller();
   private sessionPassword: string = ''; // Current login only; never persisted.
@@ -428,6 +430,7 @@ struct Index {
     try {
       await this.api.login(this.serverDraft, this.userDraft, loginPassword);
       this.sessionPassword = loginPassword;
+      this.familyNodes = []; this.familyRole = '';
       this.accountName = this.userDraft.trim(); this.alertQueue = []; this.inbox = new AlarmInbox();
       this.generation++; this.polling = false; this.demo = false; this.loggedIn = true; this.simulated = false;
       this.temp = -999; this.humi = -999; this.gas = -999; this.light = -999; this.received = 0; this.deviceTime = 0;
@@ -680,7 +683,7 @@ struct Index {
       Text(title).fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK)
       Text(subtitle).fontSize(this.readableSize(11)).fontColor(SUB)
     }.padding({top:15,bottom:15,left:4,right:4}).layoutWeight(1).border({width:{right:camera?0:0.5},color:CareTheme.line})
-      .onClick(()=>{if (camera) {router.pushUrl({url:'pages/Camera'});} else {this.navigate(3);}})
+      .onClick(()=>{if (camera) {router.pushUrl({url:'pages/Camera'});} else if (title === '随身健康') {router.pushUrl({url:'pages/Nodes',params:{kind:'wearable'}});} else {this.navigate(3);}})
   }
   @Builder
   overview() {
@@ -698,12 +701,14 @@ struct Index {
         this.homeEntry('家中画面', '一键连接', $r('app.media.camera'), true)
       }.width('100%').backgroundColor(Color.White).borderRadius(16).margin({top:16,bottom:4})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%').backgroundColor(CareTheme.warmSurface).borderRadius(12).margin({ top: 12 }) }
+      if(this.demo || this.doorEnabled===1){
       Row({space:14}) {
         Stack() { Rect().fill(CareTheme.softBlue).width(44).height(this.elderMode ? 60 : 44).radius(14); this.icon($r('app.media.home'),26) }
         Column({space:5}) { Text('房门').fontSize(this.readableSize(16)).fontWeight(FontWeight.Medium).fontColor(INK); Text(this.demo?'演示状态':this.stale()?'等待设备重新上报':'随设备上报更新').fontSize(this.readableSize(10)).fontColor(SUB).maxLines(1) }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         Blank()
         Text(this.roomDoor()).fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(!this.demo&&(this.stale()||!this.healthFresh()||this.doorValid===0)?SUB:this.doorValue===1?AMBER:PRIMARY).constraintSize({maxWidth:160}).textAlign(TextAlign.End)
       }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20).margin({top:14})
+      }
       this.livingCard()
       this.section({ title: '实时环境', subtitle: this.stale() ? '上报已过期' : '每 2 秒查询云端' })
       Row({ space: 12 }) {
@@ -857,6 +862,10 @@ struct Index {
       this.pageTitle('家庭设备', this.familyMessage)
       Column({space:8}) {
         Text('一处牵挂，多端相伴').fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(PRIMARY).width('100%')
+        Row({space:10}) {
+          Button('房间环境 ›').layoutWeight(1).fontSize(14).fontColor(PRIMARY).backgroundColor(Color.White).onClick(()=>{router.pushUrl({url:'pages/Nodes',params:{kind:'environment'}});})
+          Button('随身健康 ›').layoutWeight(1).fontSize(14).fontColor(PRIMARY).backgroundColor(Color.White).onClick(()=>{router.pushUrl({url:'pages/Nodes',params:{kind:'wearable'}});})
+        }.width('100%').margin({bottom:12})
         Text('主机守护居家，星闪连接房间与随身健康。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
         if (this.familyRole) { Text(this.familyRole==='owner'?'家庭管理员':this.familyRole==='viewer'?'只读成员':'照护成员').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%') }
         ForEach(this.familyNodes, (node: FamilyNode) => {
@@ -871,12 +880,12 @@ struct Index {
               } else { Text('等待节点实际属性上报').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
             }
             if (node.watch) {
-              Text('心率 '+(node.watch.heart_rate===null?'待测':node.watch.heart_rate+' 次/分')+'  ·  血氧 '+(node.watch.spo2===null?'待测':node.watch.spo2+'%')).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+              Text('心率 '+watchVital(node.watch.heart_rate,' 次/分',240)+'  ·  血氧 '+watchVital(node.watch.spo2,'%',100)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
               Text('采集时间 '+node.watch.received_at).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
             } else if (node.kind==='wearable') { Text('等待手表上报，不显示模拟健康值').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
           }.padding({top:14,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line}).width('100%')
         }, (node: FamilyNode) => node.device_id)
-        if (!this.familyNodes.length) { Text('家庭设备清单尚未加载').fontSize(this.readableSize(13)).fontColor(SUB).padding({top:12,bottom:12}) }
+        if (!this.familyNodes.length) { Text('可从上方入口查看已授权节点的数据').fontSize(this.readableSize(13)).fontColor(SUB).padding({top:12,bottom:12}) }
         Button('查看摄像头实时画面 ›').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{router.pushUrl({url:'pages/Camera'});})
       }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(16).width('100%').margin({bottom:18})
       Column({space:14}) {
@@ -895,7 +904,7 @@ struct Index {
       if (this.loggedIn) { Button('退出登录并返回演示').width('100%').height(45).fontSize(this.readableSize(13)).fontColor(SUB).backgroundColor('#E8EEF0').borderRadius(14).margin({top:10}).onClick(()=>{this.disconnect();}) }
       Column({space:8}) { Text('AP 与 STA').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('STA：开发板连接热点后上云，本 App 通过后端访问。AP：开发板开启 HomeSafety 热点，可直接通过浏览器访问 192.168.2.1:8080/status。两种模式由板上长按 K5 切换。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)); Text('App 不使用开发板设备密钥登录 MQTT，不会抢占开发板连接。').fontSize(this.readableSize(11)).fontColor(PRIMARY).lineHeight(this.readableLine(20)) }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(18).margin({top:18})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%') }
-      Text('颐鸿安 1.6.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
+      Text('颐鸿安 1.8.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
     }.width('100%')
   }
   @Builder
@@ -954,7 +963,7 @@ struct Index {
       Column() {
         Row() { Text('账户与连接').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text(this.loggedIn?'管理 ›':'登录 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY) }.width('100%').padding({top:16,bottom:16}).onClick(()=>{this.openConnection();})
         Row() { Text('查看设备状态').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text('›').fontSize(this.readableSize(18)).fontColor(SUB) }.width('100%').padding({top:16,bottom:16}).border({width:{top:0.5},color:'#EEF2F3'}).onClick(()=>{this.navigate(3);})
-        this.info({label:'应用版本',value:'颐鸿安 1.2.1',color:INK})
+        this.info({label:'应用版本',value:'颐鸿安 1.8.0',color:INK})
         Text('守护建议用于解释监测状态，不提供个人健康评分或诊断。报警需结合现场核实，确认处理与设备消音含义不同。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%').padding({top:12,bottom:8})
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(20)
       if (this.loggedIn) { Button('退出登录').width('100%').height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(CareTheme.alarmSurface).borderRadius(14).margin({top:20}).onClick(()=>{this.disconnect();}) }

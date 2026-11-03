@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
-    "pages/Camera"
+    "pages/Camera",
+    "pages/Nodes"
   ]
 }

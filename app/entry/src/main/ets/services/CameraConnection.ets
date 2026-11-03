@@ -1,6 +1,5 @@
 import { http, connection } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
 
 export interface CameraReport {
   firmware: string;
@@ -39,8 +38,10 @@ export class CameraConnection {
     try {
       const response=await client.request(base+'/status',{
         method:http.RequestMethod.GET,
-        header:{'Authorization':'Basic '+basic,'Cache-Control':'no-store'},
-        usingCache:false,usingProxy:false,connectTimeout:1500,readTimeout:2500,expectDataType:http.HttpDataType.STRING
+        // Arduino ESP32 WebServer skips one character after the header colon.
+        // Explicit optional whitespace keeps Basic authentication compatible with its parser.
+        header:{'Authorization':' Basic '+basic,'Cache-Control':'no-store'},
+        usingProtocol:http.HttpProtocol.HTTP1_1,usingCache:false,usingProxy:false,connectTimeout:3000,readTimeout:6000,expectDataType:http.HttpDataType.STRING
       });
       if (response.responseCode===401) { throw new Error('摄像头账号或密码不正确'); }
       if (response.responseCode!==200) { throw new Error('摄像头暂时无法响应'); }
@@ -93,7 +94,6 @@ export class CameraConnection {
   private async batch(addresses:string[], username:string, password:string): Promise<CameraFound | null> {
     const results=await Promise.all(addresses.map(async (address:string):Promise<CameraFound | null>=>{
       try { return await this.probe(address,username,password); } catch (error) {
-        if(address==='http://192.168.1.100'){ console.warn('YI_CAMERA_PROBE '+(error as BusinessError).code+' '+(error as Error).message); }
         return null;
       }
     }));

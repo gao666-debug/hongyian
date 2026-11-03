@@ -7,6 +7,7 @@ export class Backend {
   base: string = '';
   device: string = 'demo-device';
   token: string = '';
+  deviceIds: string[] = [];
   caPath: string = '';
   private publicCaPath: string = '';
   private readonly publicBase: string = 'https://backend.example.com';
@@ -63,15 +64,18 @@ export class Backend {
   async login(base: string, username: string, password: string): Promise<void> {
     const clean = base.trim().replace(/\/+$/, '');
     if (!clean.startsWith('https://')) { throw new Error('后端地址需要使用 HTTPS'); }
-    this.stopPush(); this.base = clean; this.token = '';
+    this.stopPush(); this.base = clean; this.token = ''; this.deviceIds = [];
     const response = await this.request('/api/v1/auth/login', http.RequestMethod.POST, JSON.stringify({ username: username, password: password }));
-    this.token = (response.data as LoginData).access_token;
+    const login = response.data as LoginData;
+    this.token = login.access_token;
     if (!this.token) { throw new Error('登录响应缺少令牌'); }
+    this.deviceIds = login.device_ids || [];
+    if (this.deviceIds.length && !this.deviceIds.includes(this.device)) { this.device = this.deviceIds[0]; }
   }
   async logout(): Promise<void> {
     this.stopPush();
     try { if (this.token) { await this.request('/api/v1/auth/logout', http.RequestMethod.POST, '{}'); } }
-    finally { this.token = ''; }
+    finally { this.token = ''; this.deviceIds = []; }
   }
   stopPush(): void {
     this.generation++;

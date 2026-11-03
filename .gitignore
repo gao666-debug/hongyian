@@ -24,3 +24,7 @@
 device/203_watch/src/hy_cloud_cfg.h
 device/**/*.fwpkg
 device/**/*.log
+
+# 星闪环境节点：本机凭据及烧录产物
+device/920_home_cloud/src/cfg.h
+device/**/*.img

@@ -1,0 +1,71 @@
+# Copyright (c)  2024 iSoftStone Education Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+static_library("home_safety_example") {
+    sources = [
+        "home_safety_example.c",
+        "src/home_safety.c",
+        "src/sht30.c",
+        "src/su_03t.c",
+        "src/mq2.c",
+        "src/mpu6050.c",
+        "src/lcd.c",
+        "src/key.c",
+        "src/ui.c",
+        "src/rgb.c",
+        "src/door.c",
+        "src/living.c",
+        "src/button.c",
+        "src/event_log.c",
+        "src/bh1750.c",
+        "src/net_server.c",
+        "src/nfc_tag.c",
+        "src/ndef.c",
+        "src/nfc.c",
+        "src/nfcForum.c",
+        "src/NT3H.c",
+        "src/rtdText.c",
+        "src/rtdUri.c",
+        "src/mqtt_client.c",
+        "src/cloud_commands.c",
+        "src/mqtt_tls.c",
+        "src/sntp_client.c",
+        "src/safety_runtime.c",
+        "src/safety_logic.c",
+        "src/monitor_logic.c",
+        "src/safety_stats.c",
+    ]
+
+    include_dirs = [
+        "//utils/native/lite/include",
+        "include",
+        "//base/iot_hardware/peripheral/interfaces/kits",
+        "//device/rockchip/rk2206/sdk_liteos/board/include",
+        "//device/rockchip/rk2206/adapter/include",
+        "//device/rockchip/hardware/project/rk2206/src",
+        "//device/rockchip/hardware/lib/hal/inc/",
+        "//third_party/lwip/src/include/lwip",
+        "//third_party/cJSON",
+        "//third_party/paho_mqtt/MQTTPacket/src",
+        "//third_party/paho_mqtt/MQTTClient-C/src",
+        "//device/rockchip/hardware/lib/CMSIS/Device/RK2206/Include/",
+        "//third_party/musl/porting/liteos_m/kernel/include",
+    ]
+
+    deps = [
+        "//device/rockchip/hardware:hardware",
+        "//third_party/mbedtls:mbedtls_static",
+        "//kernel/liteos_m/kal/posix",
+    ]
+}

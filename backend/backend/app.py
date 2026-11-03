@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 import hashlib
 import hmac
 import json
+import os
+from pathlib import Path
 import time
 import uuid
 from typing import Literal
@@ -12,7 +14,7 @@ from typing import Literal
 from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ConfigDict, ValidationError, StrictBool, StrictInt
 
 from .settings import Settings
@@ -89,6 +91,11 @@ class Health(BaseModel):
     env_available: bool | None = None
     fall_detection_available: bool | None = None
     time_synced: bool | None = None
+    # WS63 传感器节点快照（可选字段；通晓板固件不上报时缺省为 None，行为不变）
+    light: float | None = Field(default=None,ge=0)                 # 光敏 ADC 电压 mV
+    smoke: float | None = Field(default=None,ge=0)                 # 烟雾 ADC 电压 mV
+    body: int | None = Field(default=None,ge=0,le=1)               # 人体感应 1=有人
+    door: str | None = Field(default=None,max_length=16)           # 门磁 OPEN/CLOSED
 
 class DayStats(BaseModel):
     date: date
@@ -122,6 +129,8 @@ def create_app(settings=None, cloud=None):
     settings.validate()
     store = Store(settings.db)
     store.bootstrap_user(settings.username,settings.password)
+    from .households import Households
+    homes = Households(store, settings)
     provider = cloud if cloud is not None else HuaweiCloud(settings) if settings.mode=='live' else None
     hub = Hub()
     tasks = set()
@@ -132,12 +141,9 @@ def create_app(settings=None, cloud=None):
         return {'code':code,'message':message,'data':data,'request_id':uuid.uuid4().hex,
                 'mode':settings.mode,'simulated':settings.mode=='mock'}
 
-    def check_device(device):
-        # 手表是另一台直连设备，硬件 ID 和主板不同；配了 WATCH_DEVICE_ID 才放行。
-        allowed = {settings.device_id}
-        if settings.watch_device_id:
-            allowed.add(settings.watch_device_id)
-        if device not in allowed: raise HTTPException(404,'Device not configured')
+    def check_device(device, user=None, control=False):
+        if not settings.has_device(device): raise HTTPException(404,'Device not configured')
+        if user is not None: homes.authorize(user['username'], device, control)
 
     def session(authorization: str | None = Header(default=None)):
         if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -149,10 +155,12 @@ def create_app(settings=None, cloud=None):
         await hub.publish(device, {'schema':1,'type':kind,'device_id':device,'timestamp':utc(),
                                   'mode':settings.mode,'simulated':settings.mode=='mock','data':data})
 
-    if settings.mode=='mock' and not store.doc('mock',settings.device_id,'shadow'):
-        store.put('mock',settings.device_id,'shadow',{'device_id':settings.device_id,'service_id':'HomeSafety',
-            'online':True,'updated_at':utc(),'properties':{'temp':25.5,'humi':60,'gas':20,'light':120,
-            'body':0,'inactive':0,'alarm':0,'status':0,'help':0,'fall':0,'gas_alarm':0,'smoke':0,'door':0}})
+    if settings.mode=='mock':
+        for _dev in settings.device_ids:
+            if not store.doc('mock',_dev,'shadow'):
+                store.put('mock',_dev,'shadow',{'device_id':_dev,'service_id':'HomeSafety',
+                    'online':True,'updated_at':utc(),'properties':{'temp':25.5,'humi':60,'gas':20,'light':120,
+                    'body':0,'inactive':0,'alarm':0,'status':0,'help':0,'fall':0,'gas_alarm':0,'smoke':0,'door':0}})
 
     def command_data(row):
         body = json.loads(row['body'])
@@ -207,7 +215,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.2.0',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.4.1',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -228,6 +236,8 @@ def create_app(settings=None, cloud=None):
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws'})
 
+    homes.install(app, session, envelope)
+
     @app.post('/api/v1/auth/login')
     def login(body: Login,request: Request):
         ip = request.client.host if request.client else 'unknown'
@@ -239,7 +249,7 @@ def create_app(settings=None, cloud=None):
         token = store.login(body.username,body.password,settings.token_seconds)
         if not token: raise HTTPException(401,'Invalid username or password')
         return envelope({'access_token':token,'token_type':'Bearer','expires_in':settings.token_seconds,
-                         'username':body.username,'device_ids':[settings.device_id]})
+                         'username':body.username,'device_ids':homes.device_ids(body.username)})
 
     @app.post('/api/v1/auth/logout')
     def logout(user=Depends(session)):
@@ -248,7 +258,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/shadow')
     async def shadow(device,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         if settings.mode=='mock': data=store.doc(settings.mode,device,'shadow')
         else:
             try:
@@ -260,39 +270,156 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/health')
     def device_health(device,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope(store.doc(settings.mode,device,'health'))
 
     @app.get('/api/v1/devices/{device}/medicine/history')
     def medicine_history(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope({'items':store.list_docs(settings.mode,device,'medicine_history',limit)})
 
+    # ===== 手表（WS63 穿戴节点）数据，2026-11-02 合并自队友版本 =====
+    # 数据统一挂在主设备下（primary_device），URL 里的 device 只用于校验身份。
     @app.get('/api/v1/devices/{device}/watch')
     def watch_latest(device,user=Depends(session)):
-        check_device(device)
-        data=store.doc(settings.mode,settings.device_id,'watch')
+        check_device(device,user)
+        data = store.doc(settings.mode,settings.primary_device,'watch')
         if data is None: raise HTTPException(404,'No watch report yet')
         return envelope(data)
 
     @app.get('/api/v1/devices/{device}/watch/hours')
     def watch_hours(device,limit: int=Query(default=24,ge=1,le=720),user=Depends(session)):
-        check_device(device)
-        items=store.list_docs(settings.mode,settings.device_id,'watch_hour',limit)
+        check_device(device,user)
+        items = store.list_docs(settings.mode,settings.primary_device,'watch_hour',limit)
         for item in items:
             for name in ('hr','spo2'):
-                agg=item.get(name)
-                if agg: agg['avg']=round(agg['sum']/agg['n'],1) if agg['n'] else None
+                agg = item.get(name)
+                if agg: agg['avg'] = round(agg['sum']/agg['n'],1) if agg['n'] else None
         return envelope({'items':items,'limit':limit})
 
     @app.get('/api/v1/devices/{device}/watch/falls')
     def watch_falls(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
-        check_device(device)
-        return envelope({'items':store.list_docs(settings.mode,settings.device_id,'watch_fall',limit)})
+        check_device(device,user)
+        return envelope({'items':store.list_docs(settings.mode,settings.primary_device,'watch_fall',limit)})
+    # ===== 手表接口结束 =====
+
+    # ===== 视觉抓拍：事件触发取证（2026-10-22 设计，2026-10-24 上线） =====
+    # 复用 documents 表（kind=capture_request / capture），不建表、不改 schema、零迁移。
+    # 图片二进制落磁盘，数据库只存元数据。
+    CAPTURE_DIR = Path(settings.db).parent / 'captures'
+    CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+    MAX_CAPTURE_BYTES = 4 * 1024 * 1024   # 单张上限 4MB（OV2640 VGA JPEG 通常 20~60KB）
+    # 报警联动开关：默认关闭。固件 alarm.code(1..5) 的语义尚未在文档中固化，
+    # 确认对应关系后写环境变量 CAPTURE_ALARM_CODES（如 "1,2"）即可启用，无需改代码。
+    CAPTURE_ALARM_CODES = {int(x) for x in os.getenv('CAPTURE_ALARM_CODES','').split(',') if x.strip().isdigit()}
+
+    class CaptureRequestIn(BaseModel):
+        reason: str = Field(default='MANUAL', max_length=32)
+
+    def request_capture_on_alarm(reason: str, device: str | None = None):
+        """报警联动入口：标记一个待抓拍请求，ESP32-CAM 轮询到 pending 后拍照回传。
+        多设备版：按触发报警的设备记账；device 缺失时记到第一台配置的设备。"""
+        dev = device if (device and settings.has_device(device)) else settings.device_ids[0]
+        req_id = uuid.uuid4().hex
+        store.put(settings.mode, dev, 'capture_request', {
+            'pending': True,
+            'request_id': req_id,
+            'reason': reason,
+            'created_at': int(time.time()),
+            'source': 'alarm',
+        })
+        return req_id
+
+    @app.get('/api/v1/devices/{device}/capture-request')
+    def get_capture_request(device,user=Depends(session)):
+        """ESP32-CAM 轮询此接口；也供 App 查询当前是否有待抓拍。"""
+        check_device(device,user)
+        doc = store.doc(settings.mode,device,'capture_request') or {}
+        return envelope({'pending':bool(doc.get('pending')),'request_id':doc.get('request_id'),
+                         'reason':doc.get('reason'),'created_at':doc.get('created_at'),
+                         'fulfilled_by':doc.get('fulfilled_by')})
+
+    @app.post('/api/v1/devices/{device}/capture-request',status_code=202)
+    def create_capture_request(device,body: CaptureRequestIn,user=Depends(session)):
+        """App 主动请求抓拍（监护人想看一眼现场）。"""
+        check_device(device,user,control=True)
+        req_id = uuid.uuid4().hex
+        store.put(settings.mode,device,'capture_request',{
+            'pending':True,'request_id':req_id,'reason':body.reason,
+            'created_at':int(time.time()),'source':'app'})
+        return envelope({'request_id':req_id,'pending':True})
+
+    @app.post('/api/v1/devices/{device}/captures',status_code=201)
+    async def upload_capture(device,request: Request,user=Depends(session)):
+        """ESP32-CAM 上传 JPEG。body 是裸二进制，理由与请求号走 header。"""
+        check_device(device,user,control=True)
+        raw = await request.body()
+        if not raw:
+            raise HTTPException(400,'empty body')
+        if len(raw) > MAX_CAPTURE_BYTES:
+            raise HTTPException(413,'capture too large')
+        # JPEG 魔数 FF D8，防止传上来一堆乱码白占磁盘
+        if len(raw) < 2 or not (raw[0] == 0xFF and raw[1] == 0xD8):
+            raise HTTPException(415,'not a JPEG')
+        req_id = request.headers.get('x-capture-request-id','')
+        reason = (request.headers.get('x-capture-reason') or 'MANUAL')[:32]
+        capture_id = uuid.uuid4().hex
+        (CAPTURE_DIR / f'{capture_id}.jpg').write_bytes(raw)
+        meta = {'capture_id':capture_id,'device':device,'reason':reason,'request_id':req_id,
+                'bytes':len(raw),'created_at':int(time.time()),
+                'file':f'{capture_id}.jpg'}   # 只存文件名，不暴露服务器绝对路径
+        store.put(settings.mode,device,'capture',meta,key=capture_id)
+        # 抓到了就清掉 pending，避免重复拍
+        store.put(settings.mode,device,'capture_request',{
+            'pending':False,'request_id':req_id,'reason':reason,
+            'created_at':int(time.time()),'fulfilled_by':capture_id})
+        try:
+            await publish(device,'capture',meta)
+        except Exception:
+            pass
+        return envelope(meta)
+
+    @app.get('/api/v1/devices/{device}/captures')
+    def list_captures(device,limit: int=Query(default=20,ge=1,le=200),user=Depends(session)):
+        """抓拍历史（按时间倒序，已删除的不返回）。"""
+        check_device(device,user)
+        items=[x for x in store.list_docs(settings.mode,device,'capture',limit) if not x.get('deleted')]
+        return envelope({'items':items})
+
+    @app.get('/api/v1/devices/{device}/captures/{capture_id}')
+    def get_capture_image(device,capture_id,user=Depends(session)):
+        """取图片本体，直接返回 image/jpeg。"""
+        check_device(device,user)
+        meta = store.doc(settings.mode,device,'capture',key=capture_id)
+        if not meta or meta.get('deleted'):
+            raise HTTPException(404,'capture not found')
+        p = CAPTURE_DIR / str(meta.get('file',''))
+        # 防止 file 字段被篡改成 ../ 越权读取
+        if p.resolve().parent != CAPTURE_DIR.resolve() or not p.exists():
+            raise HTTPException(404,'capture file missing')
+        return Response(content=p.read_bytes(),media_type='image/jpeg',
+                        headers={'Cache-Control':'private, max-age=60'})
+
+    @app.delete('/api/v1/devices/{device}/captures/{capture_id}')
+    def delete_capture(device,capture_id,user=Depends(session)):
+        """隐私开关：单张删除（批量删就是循环调这个）。"""
+        check_device(device,user,control=True)
+        meta = store.doc(settings.mode,device,'capture',key=capture_id)
+        if not meta or meta.get('deleted'):
+            raise HTTPException(404,'capture not found')
+        p = CAPTURE_DIR / str(meta.get('file',''))
+        if p.resolve().parent == CAPTURE_DIR.resolve() and p.exists():
+            p.unlink()
+        store.put(settings.mode,device,'capture',{'capture_id':capture_id,'deleted':True,
+                  'deleted_at':int(time.time())},key=capture_id)
+        return envelope({'capture_id':capture_id,'deleted':True})
+
+    # ===== 视觉抓拍结束 =====
 
     @app.post('/api/v1/commands',status_code=202)
     async def commands(body: Command,user=Depends(session)):
-        check_device(body.device_id)
+        check_device(body.device_id,user,control=True)
+        if body.device_id != settings.primary_device: raise HTTPException(422,"This device does not support gateway commands")
         if body.command_name in ('ack','mute') and body.paras:
             raise HTTPException(422,'ack/mute require paras:{}')
         try:
@@ -313,23 +440,28 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/commands/{command_id}')
     def command_result(command_id,user=Depends(session)):
-        row = store.command(command_id,settings.mode,settings.device_id)
-        if not row or row['username']!=user['username']: raise HTTPException(404,'Command not found')
+        row = store.command(command_id,settings.mode)
+        if not row or row['username']!=user['username'] or not settings.has_device(row['device']):
+            raise HTTPException(404,'Command not found')
         return envelope(command_data(row))
 
     @app.post('/api/v1/ws-ticket')
     def ws_ticket(device_id: str=Query(...),user=Depends(session)):
-        check_device(device_id)
+        check_device(device_id,user)
         return envelope({'ticket':store.ticket(user['token_hash'],device_id),'expires_in':30,
                          'path':'/api/v1/ws','device_id':device_id})
 
     @app.websocket('/api/v1/ws')
     async def websocket(ws: WebSocket,device_id: str,ticket: str):
-        if device_id!=settings.device_id:
+        if device_id not in homes.configured_ids():
             await ws.close(code=4404); return
         grant = store.consume_ticket(ticket,device_id)
         if not grant or not store.session(grant['session_hash']):
             await ws.close(code=4401); return
+        try:
+            homes.authorize(store.session(grant['session_hash'])['username'],device_id)
+        except HTTPException:
+            await ws.close(code=4403); return
         await ws.accept()
         queue = asyncio.Queue(maxsize=100)
         hub.clients[device_id].add(queue)
@@ -361,11 +493,39 @@ def create_app(settings=None, cloud=None):
             await asyncio.gather(send_task,receive_task,return_exceptions=True)
             hub.clients[device_id].discard(queue)
 
+    async def ingest_nearlink(device,payload):
+        services=payload.get('services') or [payload]
+        service=next((item for item in services if isinstance(item,dict) and isinstance(item.get('properties'),dict) and any(k in item['properties'] for k in ('light','smoke','body','door'))),None)
+        if service is None: raise HTTPException(422,'No NearLink properties')
+        import math
+        props={}
+        for key,value in service['properties'].items():
+            if key in ('temp','humi','light','smoke'):
+                if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value): raise HTTPException(422,'Invalid sensor value')
+                props[key]=value
+            elif key=='body':
+                if type(value) is not int or value not in (0,1): raise HTTPException(422,'Invalid body value')
+                props[key]=value
+            elif key=='door':
+                if value not in ('OPEN','CLOSED'): raise HTTPException(422,'Invalid door value')
+                props[key]=value
+        old=store.doc(settings.mode,device,'shadow') or {'properties':{}}
+        old['properties'].update(props)
+        old.update(device_id=device,service_id=service.get('service_id',''),updated_at=utc(),online=True)
+        store.put(settings.mode,device,'shadow',old)
+        await publish(device,'properties',old)
+        return envelope({'accepted':True})
+
     async def ingest_watch(device,payload):
-        """手表属性上报入库：最新值 + 小时桶 + 摔倒事件，并实时推给 App。"""
+        """手表属性上报入库：最新值 + 小时桶 + 摔倒事件，并实时推给 App。
+
+        手表数据统一挂在**主设备**（device_ids 第一台）下：App 只面向一台设备，
+        不必区分两颗芯片。这里用 primary_device 而不是 settings.device_id ——
+        后者在配了多台设备时是逗号分隔的字符串，直接当 device 用会写出脏键。
+        """
         check_device(device)
-        # 手表数据统一挂在 App 面向的那台设备下，App 不用区分两颗芯片
-        device = settings.device_id
+        source_device = device
+        target = settings.primary_device
         services = payload.get('services')
         if services is None and 'properties' in payload:
             services = [payload]        # IoTDA 通知里 body 是单条 service
@@ -376,9 +536,12 @@ def create_app(settings=None, cloud=None):
             report = watch_model.normalize(service.get('properties'),service.get('service_id',''),utc())
         except watch_model.WatchReportError:
             raise HTTPException(422,'Invalid watch properties')
-        previous = store.doc(settings.mode,device,'watch') or {}
-        store.put(settings.mode,device,'watch',report)
-        hour = store.watch_hour(settings.mode,device,report)
+        previous = store.doc(settings.mode,target,'watch') or {}
+        store.put(settings.mode,target,'watch',report)
+        hour = store.watch_hour(settings.mode,target,report)
+        if source_device != target:
+            store.put(settings.mode,source_device,'watch',report)
+            await publish(source_device,'watch',report)
         # fall_count 只增不减，差值就是这一条上报里新增的摔倒判定
         known = previous.get('fall_count') or 0
         events = []
@@ -386,12 +549,12 @@ def create_app(settings=None, cloud=None):
             event = {'kind':'watch_fall','fall_count':index,'detected_at':report['received_at'],
                      'heart_rate':report['heart_rate'],'spo2':report['spo2'],
                      'motion_mg':report['motion_mg'],'steps':report['steps']}
-            store.put(settings.mode,device,'watch_fall',event,str(index))
+            store.put(settings.mode,target,'watch_fall',event,str(index))
             events.append(event)
-        await publish(device,'watch',report)
+        await publish(target,'watch',report)
         for event in events:
-            await publish(device,'watch_fall',event)
-        return envelope({'accepted':True,'fall_events':len(events),'hour':hour['hour']})
+            await publish(target,'watch_fall',event)
+        return envelope({'accepted':True,'fall_events':len(events),'hour':hour['hour'],'device':target})
 
     async def ingest(device,message):
         check_device(device)
@@ -432,19 +595,25 @@ def create_app(settings=None, cloud=None):
                 if data['time_synced']:
                     for day in data['days']:
                         store.put(settings.mode,device,'day',day,day['date'],db)
+        # 报警联动（默认关闭）：报警开始时刻标记待抓拍，ESP32-CAM 轮询到后取证。
+        if message.name=='alarm_event' and CAPTURE_ALARM_CODES and data.get('phase')=='start' and data.get('code') in CAPTURE_ALARM_CODES:
+            try: request_capture_on_alarm('ALARM%d'%data['code'], device)
+            except Exception: pass
         kind={'alarm_event':'alarm','device_health':'health','activity_stats':'stats'}[message.name]
         await publish(device,kind,data)
         return envelope({'duplicate':False,'accepted':True})
 
-    @app.post('/api/v1/mock/messages')
-    async def mock_message(message: DeviceMessage,device_id: str=Query(...),user=Depends(session)):
-        if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
-        return await ingest(device_id,message)
-
     @app.post('/api/v1/mock/watch')
     async def mock_watch(report: WatchReport,device_id: str=Query(...),user=Depends(session)):
         if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
+        check_device(device_id,user,control=True)
         return await ingest_watch(device_id,report.model_dump())
+
+    @app.post('/api/v1/mock/messages')
+    async def mock_message(message: DeviceMessage,device_id: str=Query(...),user=Depends(session)):
+        if settings.mode!='mock': raise HTTPException(404,'Mock API disabled in live mode')
+        check_device(device_id,user,control=True)
+        return await ingest(device_id,message)
 
     @app.post('/api/v1/iotda/notifications')
     async def notifications(request: Request,token: str | None=Query(default=None),x_webhook_token: str | None=Header(default=None)):
@@ -464,7 +633,16 @@ def create_app(settings=None, cloud=None):
         except (KeyError,TypeError,ValueError,AttributeError):
             raise HTTPException(422,'Expected IoTDA device.message/device.property report')
         if resource=='device.property':
-            # 属性上报走手表链路：service_id + properties
+            # 属性上报只服务手表：
+            #   - 未知设备 -> 404（与其它接口一致，便于排障）
+            #   - 已知但非手表（如 WS63 环境节点也发属性上报）-> 忽略并返回 200，
+            #     避免它每 10 秒一条产生 422 噪音和死信堆积
+            if not settings.has_device(device):
+                raise HTTPException(404,'Device not configured')
+            if settings.nearlink_device_id and device == settings.nearlink_device_id:
+                return await ingest_nearlink(device,body if isinstance(body,dict) else json.loads(body))
+            if not settings.is_watch(device):
+                return envelope({'ignored':True,'reason':'property report from non-watch device'})
             return await ingest_watch(device,body if isinstance(body,dict) else json.loads(body))
         try:
             content=body['content']
@@ -476,12 +654,12 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/alarms')
     def alarms(device,limit: int=Query(default=50,ge=1,le=100),offset: int=Query(default=0,ge=0),user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         return envelope({'items':store.list_docs(settings.mode,device,'alarm',limit,offset),'limit':limit,'offset':offset})
 
     @app.post('/api/v1/devices/{device}/alarms/{event_key}/notes',status_code=201)
     def add_note(device,event_key,body: Note,user=Depends(session)):
-        check_device(device)
+        check_device(device,user,control=True)
         if not store.doc(settings.mode,device,'alarm',event_key): raise HTTPException(404,'Alarm not found')
         with store.connection() as db:
             cur=db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
@@ -490,7 +668,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
     def notes(device,event_key,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         with store.connection() as db:
             rows=db.execute('SELECT id,username,note,resolution,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id',
                             (settings.mode,device,event_key)).fetchall()
@@ -498,7 +676,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/stats')
     def stats(device,from_date: date | None=None,to_date: date | None=None,user=Depends(session)):
-        check_device(device)
+        check_device(device,user)
         if from_date and to_date and from_date>to_date: raise HTTPException(422,'Invalid date range')
         days=store.list_docs(settings.mode,device,'day',1000)
         days=[d for d in days if (not from_date or d['date']>=from_date.isoformat()) and (not to_date or d['date']<=to_date.isoformat())]
