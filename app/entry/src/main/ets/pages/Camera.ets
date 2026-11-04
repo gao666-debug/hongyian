@@ -19,7 +19,7 @@ struct HomeCameraPage {
   @State address: string = '';
   @State source: string = '';
   @State username: string = 'user';
-  @State password: string = '';
+  @State password: string = '123456';
   @State message: string = '同一网络，一键看见家中';
   @State busy: boolean = false;
   @State settingsOpen: boolean = false;

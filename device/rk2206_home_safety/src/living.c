@@ -42,7 +42,11 @@ static int parse(int code,const char *json,request_t *out){
  cJSON *j=cJSON_ParseWithOpts(json,NULL,1);int ok=0;
  memset(out,0,sizeof(*out));
  if(!cJSON_IsObject(j))goto done;
- if(code==SAFETY_CMD_LIVING||code==SAFETY_CMD_MEDICINE_PLAN){
+ if(code==SAFETY_CMD_LIGHT){
+  cJSON *mode=field(j,"mode");
+  if(cJSON_GetArraySize(j)!=1||!integer(mode,-1,1))goto done;
+  out->slot=mode->valueint;ok=1;
+ }else if(code==SAFETY_CMD_LIVING||code==SAFETY_CMD_MEDICINE_PLAN){
   cJSON *n=field(j,"night_auto"),*m=field(j,"medicine_enabled"),*t=field(j,"medicine_minute"),*r=field(j,"expected_revision");
   int count=code==SAFETY_CMD_LIVING?4:8;
   if(cJSON_GetArraySize(j)!=count||!cJSON_IsBool(n)||!cJSON_IsBool(m)||!integer(t,0,1439)||!integer(r,1,999999999))goto done;
@@ -118,6 +122,7 @@ int living_save(const living_config_t *cfg){
 }
 int living_execute(int code,const char *json,unsigned epoch){
  request_t r;int rc=parse(code,json,&r);if(rc)return rc;
+ if(code==SAFETY_CMD_LIGHT){living_light_override(r.slot);return 0;}
  if(code==SAFETY_CMD_LIVING||code==SAFETY_CMD_MEDICINE_PLAN){
   if(code==SAFETY_CMD_LIVING){living_status_t old;living_get(&old);memcpy(r.config.extra_enabled,old.config.extra_enabled,sizeof(r.config.extra_enabled));memcpy(r.config.extra_minute,old.config.extra_minute,sizeof(r.config.extra_minute));}
   return living_save(&r.config);
@@ -140,6 +145,7 @@ int living_execute(int code,const char *json,unsigned epoch){
 }
 void living_tick(unsigned epoch,uint64_t now,double lux,int valid,int alarm){
  safety_lock();living_status_t previous=state;
+ state.light_mode=light_override;
  state.light_valid=valid&&isfinite(lux)&&lux>=0;
  if(!state.light_valid||!state.config.night_auto){dark=0;candidate=-1;}
  else{int want=dark;if(lux<30)want=1;else if(lux>60)want=0;
@@ -161,7 +167,7 @@ int living_beep(uint64_t now){safety_lock();uint64_t age=now-pending_since;int o
 void living_silence(void){safety_lock();silenced=1;safety_unlock();}
 int living_json(char *out,int size){
  living_status_t s;living_get(&s);const char *owners[]={"off","night","medicine","alarm"};
- int n=snprintf(out,size,"{\"schema\":2,\"config_revision\":%u,\"night_auto\":%s,\"night_on\":%s,\"light_valid\":%s,\"light_owner\":\"%s\",\"medicine_enabled\":%s,\"medicine_minute\":%d,\"medicine_state\":%d,\"dose_day\":%d,\"confirmed_epoch\":%u,\"time_synced\":%s,\"medicine_revision\":%u,\"slots\":[",s.config.revision,s.config.night_auto?"true":"false",s.night_on?"true":"false",s.light_valid?"true":"false",owners[s.light_owner],s.config.medicine_enabled?"true":"false",s.config.medicine_minute,s.medicine_state,s.dose_day,s.confirmed_epoch,s.time_synced?"true":"false",s.medicine_revision);
+ int n=snprintf(out,size,"{\"schema\":2,\"light_mode\":%d,\"config_revision\":%u,\"night_auto\":%s,\"night_on\":%s,\"light_valid\":%s,\"light_owner\":\"%s\",\"medicine_enabled\":%s,\"medicine_minute\":%d,\"medicine_state\":%d,\"dose_day\":%d,\"confirmed_epoch\":%u,\"time_synced\":%s,\"medicine_revision\":%u,\"slots\":[",s.light_mode,s.config.revision,s.config.night_auto?"true":"false",s.night_on?"true":"false",s.light_valid?"true":"false",owners[s.light_owner],s.config.medicine_enabled?"true":"false",s.config.medicine_minute,s.medicine_state,s.dose_day,s.confirmed_epoch,s.time_synced?"true":"false",s.medicine_revision);
  if(n<0||n>=size)return -1;
  for(int i=0;i<3;i++){
   int k=snprintf(out+n,size-n,"%s{\"slot\":%d,\"enabled\":%s,\"minute\":%d,\"state\":%d,\"confirmed_epoch\":%u}",i?",":"",i,living_slot_enabled(&s.config,i)?"true":"false",living_slot_minute(&s.config,i),s.slot_state[i],s.slot_epoch[i]);

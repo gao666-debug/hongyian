@@ -230,4 +230,8 @@ void lcd_show_float_num1(uint16_t x, uint16_t y, float num, uint8_t len, uint16_
 void lcd_show_picture(uint16_t x, uint16_t y, uint16_t length, uint16_t width, const uint8_t *pic);
 
 
+/* Bounded 84x32 ASCII metric transition, progress 0..32. */
+void lcd_metric_slide(uint16_t x,uint16_t y,const char *old_text,const char *new_text,
+                      uint8_t old_size,uint8_t new_size,uint8_t progress,uint16_t fg,uint16_t bg);
+
 #endif /* _LCD_H_ */

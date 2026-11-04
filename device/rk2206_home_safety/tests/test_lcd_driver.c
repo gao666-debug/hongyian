@@ -39,6 +39,12 @@ int main(void){
  unsigned char *long_text=malloc(4097);assert(long_text);memset(long_text,'A',4096);long_text[4096]=0;
  reset();lcd_show_chinese(0,0,long_text,0,0,16,0);finish();assert(calls<1000);free(long_text);
  reset();lcd_show_chinese(319,0,mixed,0,0,16,0);lcd_show_chinese(0,239,mixed,0,0,16,0);lcd_show_char(0,0,255,0,0,16,0);finish();
+ for(unsigned phase=0;phase<=32;phase++) {
+  reset();lcd_metric_slide(121,75,"24.9","25.0",32,32,phase,LCD_BLACK,LCD_WHITE);finish();
+  assert(windows==1 && pixel_bytes==84*32*2 && maxlen<=128 && calls<60);
+ }
+ reset();lcd_metric_slide(300,230,"1","2",32,32,16,0,0);assert(!calls);
+ reset();lcd_metric_slide(121,75,"","123456",24,24,32,0,0);finish();
  reset();fail=1;lcd_fill(0,0,320,240,0);assert(calls<20);fail=0;writing=0;
  puts("PASS real LCD driver: exact pixel counts, clipping, mixed UTF-8/ASCII, truncated sequences, long strings and bounded SPI failure");
 }

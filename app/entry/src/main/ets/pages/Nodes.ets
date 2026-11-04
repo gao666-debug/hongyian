@@ -205,6 +205,7 @@ struct Nodes {
     }.width('100%')
     if (this.watchError) { Text(this.watchError).fontSize(13).fontColor(CareTheme.warmInk).width('100%') }
     Column() {
+      this.information({label:'电量',value:this.watch&&this.watch.battery_percent!==null&&this.watch.battery_percent!==undefined?sensorText(this.watch.battery_percent,'%'):'未采集'})
       this.information({label:'跌倒监测',value:this.fallText()})
       this.information({label:'累计判定次数',value:this.watch ? sensorText(this.watch.fall_count,' 次') : '待上报'})
       this.information({label:'活动强度',value:this.watch ? sensorText(this.watch.dynamic_mg,' mg') : '待上报'})

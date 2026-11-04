@@ -11,12 +11,12 @@ export interface MedicineDraft { slot: number; enabled: boolean; hour: string; m
 export interface MedicineRecord { dose_day: number; slot: number; state: number; minute: number; confirmed_epoch: number; epoch: number; medicine_revision: number; }
 export interface MedicineHistory { items: MedicineRecord[]; }
 export interface LivingStatus {
-  schema: number; config_revision: number; night_auto: boolean; night_on: boolean; light_valid: boolean;
+  schema: number; config_revision: number; light_mode?: number; night_auto: boolean; night_on: boolean; light_valid: boolean;
   light_owner: string; medicine_enabled: boolean; medicine_minute: number; medicine_state: number;
   dose_day: number; confirmed_epoch: number; time_synced: boolean;
   medicine_revision?: number; slots?: MedicineSlot[];
 }
-export interface CommandParameters { night_auto?: boolean; medicine_enabled?: boolean; medicine_minute?: number; expected_revision?: number; dose_day?: number;
+export interface CommandParameters { mode?: number; night_auto?: boolean; medicine_enabled?: boolean; medicine_minute?: number; expected_revision?: number; dose_day?: number;
   medicine_enabled_2?: boolean; medicine_minute_2?: number; medicine_enabled_3?: boolean; medicine_minute_3?: number;
   slot?: number; taken?: boolean; expected_medicine_revision?: number; }
 export interface Health {
@@ -25,7 +25,8 @@ export interface Health {
   door_enabled?: number; door_valid?: number; wireless_btn_enabled?: number; data_state?: string; data_stale?: boolean;
   env_available?: boolean; fall_detection_available?: boolean; time_synced?: boolean;
 }
-export interface AlarmEvent { boot_id: number; event_id: number; code: number; phase: string; epoch: number; up: number; duration: number; value: number; }
+export interface Handling { resolution: string; username: string; created: number; }
+export interface AlarmEvent { source?: string; source_device_id?: string; handling?: Handling; boot_id: number; event_id: number; code: number; phase: string; epoch: number; up: number; duration: number; value: number; }
 export interface AlarmList { items: AlarmEvent[]; }
 export interface Note { note: string; resolution: string; }
 export interface NoteItem { note: string; resolution: string; username?: string; created?: string; }
@@ -49,3 +50,7 @@ export function alarmTime(item: AlarmEvent): string {
 }
 
 export interface CommandRequest { device_id: string; service_id: string; command_name: string; paras: CommandParameters; client_request_id: string; }
+
+export interface ActivityComparison { date: string; baseline_date: string; activity_total: number | null; baseline_total: number | null; change_percent: number | null; note: string; }
+export interface PeriodReport { from_date: string; to_date: string; observed_days: number; calendar_days: number; activity_total: number; alarm_total: number; daily_average: number | null; peak_hour: number | null; }
+export interface ActivityReport { comparison: ActivityComparison; week: PeriodReport; month: PeriodReport; advice: string; }

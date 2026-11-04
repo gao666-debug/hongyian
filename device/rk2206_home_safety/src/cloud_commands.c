@@ -51,6 +51,7 @@ void cloud_command_accept(const char *topic, const char *body, size_t length)
         if (!strcmp(name->valuestring, "mute") && !cJSON_GetArraySize(paras)) code = SAFETY_CMD_MUTE;
     }
     if (cJSON_IsString(name) && cJSON_IsObject(paras)) {
+        if (!strcmp(name->valuestring,"set_light")) code=SAFETY_CMD_LIGHT;
         if (!strcmp(name->valuestring,"set_living")) code=SAFETY_CMD_LIVING;
         if (!strcmp(name->valuestring,"confirm_medicine")) code=SAFETY_CMD_MEDICINE;
         if (!strcmp(name->valuestring,"set_medicine_plan")) code=SAFETY_CMD_MEDICINE_PLAN;

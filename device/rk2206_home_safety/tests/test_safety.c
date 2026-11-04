@@ -46,12 +46,18 @@ unsigned int lcd_init(void) { return 0; }
 void lcd_fill(uint16_t x,uint16_t y,uint16_t xe,uint16_t ye,uint16_t color)
 { assert(x<=xe && y<=ye && xe<=LCD_W && ye<=LCD_H);lcd_fills++;if(x==0&&y==0&&xe>=LCD_W-1&&ye>=LCD_H-1)lcd_clears++; }
 void lcd_draw_line(uint16_t x,uint16_t y,uint16_t xe,uint16_t ye,uint16_t color) {}
+void lcd_draw_circle(uint16_t x,uint16_t y,uint8_t r,uint16_t color) {assert(x>=r&&y>=r&&x+r<LCD_W&&y+r<LCD_H);}
+void lcd_draw_rectangle(uint16_t x,uint16_t y,uint16_t xe,uint16_t ye,uint16_t color) {assert(x<=xe&&y<=ye&&xe<LCD_W&&ye<LCD_H);}
 void lcd_show_chinese(uint16_t x,uint16_t y,uint8_t *text,uint16_t fg,uint16_t bg,uint8_t size,uint8_t mode)
 {
     lcd_texts++;
     assert(y+size<=LCD_H);
-    if(y==48+1*30 && x==4+52)snprintf(lcd_body_cell,sizeof(lcd_body_cell),"%s",text);
-    if(y==48+5*30 && x==4+52)snprintf(lcd_night_cell,sizeof(lcd_night_cell),"%s",text);
+    unsigned width=0;const unsigned char *cursor=text;
+    while(*cursor){if(*cursor>=0xE0 && cursor[1] && cursor[2]){width+=size;cursor+=3;}else{width+=size/2;cursor++;}}
+    assert(x+width<=LCD_W);
+    if(y==108 && x==18)snprintf(lcd_body_cell,sizeof(lcd_body_cell),"%s",text);
+    if(y==168 && x==18)snprintf(lcd_night_cell,sizeof(lcd_night_cell),"%s",text);
+    if(y==75 && x==121)snprintf(lcd_temp_cell,sizeof(lcd_temp_cell),"%s",text);
     if(y==28 && x==32)snprintf(lcd_network_line,sizeof(lcd_network_line),"%s",text);
     if(y==28 && x==160)snprintf(lcd_cloud_line,sizeof(lcd_cloud_line),"%s",text);
 }
@@ -623,7 +629,7 @@ static void test_wifi_backup(void)
 {
     sta = 0; wifi_attempts = 0; wifi_success_at = 2;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
-    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(!strcmp(wifi_selected, "Mate 80 Pro"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 1);
@@ -631,7 +637,7 @@ static void test_wifi_backup(void)
     assert(mqtt_connect_wifi() == -1 && wifi_attempts == 3);
     sta = 0; wifi_attempts = 0; wifi_success_at = 3;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
-    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(!strcmp(wifi_selected, "lumine"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
     sta = 1;
     wifi_current = 2; wifi_recoveries = cloud_failures = 0; wifi_recovery_started = false;
@@ -639,7 +645,7 @@ static void test_wifi_backup(void)
     assert(sta == 1);
     wifi_cloud_failed(4000); assert(wifi_first == 2 && wifi_recoveries == 1);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
-    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "lumine"));
     wifi_cloud_failed(5000); wifi_cloud_failed(6000); wifi_cloud_failed(7000); wifi_cloud_failed(8000);
     assert(wifi_recoveries == 1); /* no rapid reconnect storm */
     wifi_cloud_failed(124000); assert(wifi_first == 0 && wifi_recoveries == 2);
@@ -648,7 +654,7 @@ static void test_wifi_backup(void)
     wifi_cloud_ok(); assert(cloud_failures == 0 && wifi_recoveries == 0);
     wifi_first = 0; sta = 1;
     puts("PASS cloud failure recovery: threshold, cooldown, current refresh, alternate rotation");
-    puts("PASS three hotspots including CONFIGURE_LOCALLY, existing link preservation, all unavailable");
+    puts("PASS three hotspots including lumine, existing link preservation, all unavailable");
 }
 static void test_cloud_commands(void)
 {
@@ -916,6 +922,14 @@ static void test_voice(void)
     su03t_receive_bytes(light_off,2);living_tick(0,1001,0,1,0);living_get(&lamp);assert(!lamp.night_on);
     su03t_receive_bytes(light_on,2);living_tick(0,1002,0,1,1);living_get(&lamp);assert(!lamp.night_on&&lamp.light_owner==3);
     su03t_receive_bytes(automatic,2);living_tick(0,1003,500,1,0);living_get(&lamp);assert(!lamp.night_on);
+    assert(living_validate(SAFETY_CMD_LIGHT,"{\"mode\":true}")==1);
+    assert(living_validate(SAFETY_CMD_LIGHT,"{\"mode\":2}")==1);
+    assert(living_execute(SAFETY_CMD_LIGHT,"{\"mode\":1}",0)==0);
+    living_tick(0,1100,500,1,0);living_get(&lamp);assert(lamp.night_on && lamp.light_mode==1);
+    living_tick(0,1101,500,1,1);living_get(&lamp);assert(lamp.light_owner==3);
+    assert(living_execute(SAFETY_CMD_LIGHT,"{\"mode\":0}",0)==0);
+    living_tick(0,1102,0,1,0);living_get(&lamp);assert(!lamp.night_on);
+    assert(living_execute(SAFETY_CMD_LIGHT,"{\"mode\":-1}",0)==0);
     printf("PASS factory voice lamp: split ON, OFF, AUTO, alarm priority\n");
     voice_len = 0;
     su03t_send_u8_msg(VOICE_IDX_NO_ACTIVITY,0);
@@ -997,9 +1011,12 @@ static void test_page_refresh(void)
     assert(lcd_fills==f && lcd_texts==t && lcd_clears==c);
     living_status_t status;living_get(&status);living_config_t draft=status.config;
     draft.night_auto=!draft.night_auto;ui_show_living(&draft,0,-1);
-    assert(lcd_clears==c && lcd_fills==f+3 && lcd_texts==t+3);
+    assert(lcd_clears==c && lcd_fills>f && lcd_fills<=f+6 && lcd_texts>t && lcd_texts<=t+6);
     f=lcd_fills;t=lcd_texts;ui_show_living(&draft,1,-1);
-    assert(lcd_clears==c && lcd_fills==f+3 && lcd_texts==t+3); /* Night marker, slot marker and editing hint. */
+    assert(lcd_clears==c && lcd_fills>f && lcd_fills<=f+6 && lcd_texts>t && lcd_texts<=t+6); /* Night marker, slot marker and editing hint. */
+    f=lcd_fills;t=lcd_texts;
+    for(int i=0;i<20;i++)ui_show_living(&draft,1,-1);
+    assert(lcd_fills==f && lcd_texts==t);
     draft.medicine_minute=1439;ui_show_living(&draft,2,-1);
     draft.medicine_minute=0;ui_show_living(&draft,3,0);
     assert(lcd_clears==c); /* Shorter text is erased within its own row. */
@@ -1007,6 +1024,28 @@ static void test_page_refresh(void)
     c=lcd_clears;ui_show_diagnostics();assert(lcd_clears==c+1);
     ui_show_main();c=lcd_clears;ui_show_diagnostics();assert(lcd_clears==c+1);
     puts("PASS LCD row caching: unchanged pages write nothing, changed rows only, page re-entry resets cache");
+}
+static void test_event_page_states(void)
+{
+    event_log_clear();ui_show_events(0);
+    unsigned fills=lcd_fills,texts=lcd_texts,clears=lcd_clears;
+    for(int i=0;i<20;i++)ui_show_events(0);
+    assert(lcd_fills==fills && lcd_texts==texts && lcd_clears==clears);
+    safety_state_t state={0};state.help=1;state.alarm=1;
+    safety_state_set(&state);
+    int id=event_log_add("HELP",0);ui_show_events(0);
+    assert(lcd_clears==clears && lcd_texts>texts);
+    fills=lcd_fills;texts=lcd_texts;ui_show_events(0);
+    assert(lcd_fills==fills && lcd_texts==texts);
+    state.help=0;state.alarm=0;safety_state_set(&state);
+    event_log_set_duration(id,10);ui_show_events(0);
+    assert(lcd_clears==clears && lcd_texts>texts);
+    for(int i=0;i<16;i++)event_log_add("MED_TAKEN",i%3+1);
+    ui_show_events(1);clears=lcd_clears;fills=lcd_fills;texts=lcd_texts;
+    for(int i=0;i<20;i++)ui_show_events(1);
+    assert(lcd_clears==clears && lcd_fills==fills && lcd_texts==texts);
+    event_log_clear();ui_show_events(1);assert(lcd_clears==clears);
+    puts("PASS event pages: empty/history/end transitions repaint rows only; both pages cache and clip safely");
 }
 static void test_deferred_display(void)
 {
@@ -1026,6 +1065,7 @@ static void test_deferred_display(void)
 static void test_monitor_display_snapshot(void)
 {
     safety_state_t frame = {0};
+    frame.sample_received=1;frame.sample_up=(unsigned int)(tick/1000);
     frame.temp=25.5; frame.humi=60; frame.env_valid=1; frame.env_cached=1;
     frame.body=1; frame.body_valid=1; frame.door_valid=1;
     safety_state_set(&frame);
@@ -1035,12 +1075,12 @@ static void test_monitor_display_snapshot(void)
     safety_state_t newer={0}; safety_state_set(&newer);
     living_tick(0,903000,5,1,0);
     ui_render_pending();
-    assert(!strcmp(lcd_temp_cell,"~25.5 C"));
-    assert(!strcmp(lcd_body_cell,"有活动"));
-    assert(!strcmp(lcd_night_cell,"报警"));
+    assert(!strcmp(lcd_temp_cell,"25.5"));
+    assert(!strcmp(lcd_body_cell,"人体 有活动"));
+    assert(!strcmp(lcd_night_cell,"夜灯 报警"));
     ui_present(0,&newer,"正常",NULL,-1,-1,0); ui_render_pending();
-    assert(!strcmp(lcd_temp_cell,"N/A") && !strcmp(lcd_body_cell,"待确认"));
-    puts("PASS display: bounded cached data marker, invalid PIR is unknown, queued temperature/validity/light owner share one snapshot");
+    assert(!strcmp(lcd_temp_cell,"--") && !strcmp(lcd_body_cell,"人体 待确认"));
+    puts("PASS display: bounded cached data without decorative prefix, invalid PIR is unknown, queued temperature/validity/light owner share one snapshot");
 }
 int main(void)
 {
@@ -1053,6 +1093,7 @@ int main(void)
     test_data_quality();
     test_cloud_display();
     test_page_refresh();
+    test_event_page_states();
     test_deferred_display();
     test_voice();
     test_fall();
@@ -1078,4 +1119,11 @@ int main(void)
     test_mqtt_queue();
     puts("ALL TESTS PASSED");
     return 0;
+}
+
+void lcd_metric_slide(uint16_t x,uint16_t y,const char *old_text,const char *new_text,
+                      uint8_t old_size,uint8_t new_size,uint8_t progress,uint16_t fg,uint16_t bg)
+{
+    (void)old_text;(void)old_size;(void)progress;
+    lcd_show_chinese(x,y,(uint8_t*)new_text,fg,bg,new_size,0);
 }

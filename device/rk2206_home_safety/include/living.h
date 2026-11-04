@@ -5,7 +5,7 @@
 typedef struct { int night_auto, medicine_enabled, medicine_minute; unsigned revision; int extra_enabled[2], extra_minute[2]; } living_config_t;
 typedef struct {
  living_config_t config;
- int light_valid, night_on, light_owner, medicine_state, dose_day, time_synced;
+ int light_mode, light_valid, night_on, light_owner, medicine_state, dose_day, time_synced;
  unsigned confirmed_epoch, medicine_revision;
  int slot_state[3]; unsigned slot_epoch[3];
 } living_status_t;

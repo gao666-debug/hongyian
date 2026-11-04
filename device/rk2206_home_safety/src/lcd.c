@@ -1100,3 +1100,34 @@ void lcd_show_picture(uint16_t x, uint16_t y, uint16_t length, uint16_t width, c
 }
 
 
+
+/* Stream a single metric tile, without a framebuffer or per-pixel SPI calls.
+ * Text remains actual readings: only its position is animated. */
+static int metric_bit(const char *text,int x,int y,int size)
+{
+    if((size!=24 && size!=32)||x<0||y<0||y>=size)return 0;
+    int col=x/(size/2), dx=x%(size/2);
+    for(int i=0;i<=col;i++)if(!text[i])return 0;
+    unsigned ch=(unsigned char)text[col];
+    if(ch<32 || ch>126)return 0;
+    unsigned index=y*((size/2+7)/8)+dx/8;
+    unsigned bits=size==32?ascii_3216[ch-32][index]:ascii_2412[ch-32][index];
+    return (bits>>(dx%8))&1;
+}
+void lcd_metric_slide(uint16_t x,uint16_t y,const char *old_text,const char *new_text,
+                      uint8_t old_size,uint8_t new_size,uint8_t progress,uint16_t fg,uint16_t bg)
+{
+    if(!old_text||!new_text||x+84>LCD_W||y+32>LCD_H)return;
+    if(progress>32)progress=32;
+    lcd_pixels_t pixels={0};
+    lcd_address_set(x,y,x+83,y+31);
+    for(int row=0;row<32;row++) {
+        for(int col=0;col<84;col++) {
+            int bit=row<32-progress?metric_bit(old_text,col,row+progress,old_size):
+                                    metric_bit(new_text,col,row-(32-progress),new_size);
+            lcd_pixel(&pixels,bit?fg:bg);
+        }
+        if(pixels.failed)return;
+    }
+    lcd_pixels_flush(&pixels);
+}

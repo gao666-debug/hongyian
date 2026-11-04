@@ -57,7 +57,7 @@ export class CameraConnection {
     const generation=++this.generation;
     const first: string[]=[];
     if (saved) { first.push(saved); }
-    for (const value of ['http://192.168.1.100','http://192.168.1.101','http://homesafety-camera.local']) {
+    for (const value of ['http://10.46.76.1','http://10.125.126.1','http://homesafety-camera.local']) {
       if (!first.includes(value)) { first.push(value); }
     }
     progress('正在连接上次使用的摄像头…');

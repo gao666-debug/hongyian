@@ -2,7 +2,7 @@
 from pathlib import Path
 import re
 p=Path(__file__).resolve().parents[1]
-texts=''.join(re.findall(r'"([^"\n]*)"',(p/'src/ui.c').read_text()+(p/'src/living.c').read_text()))
+texts=''.join(re.findall(r'"([^"\n]*)"',(p/'src/ui.c').read_text()+(p/'src/living.c').read_text()+(p/'src/event_log.c').read_text()))
 chars=set(re.findall('[\u4e00-\u9fff]',texts))
 font=(p/'include/lcd_font.h').read_text()
 for size in (16,24):

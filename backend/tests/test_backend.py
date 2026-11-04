@@ -123,3 +123,47 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(row['state'],'unknown')
 
 if __name__=='__main__': unittest.main(verbosity=2)
+
+class AppSOSAndBatchTests(unittest.TestCase):
+    setUp=BackendTests.setUp
+    tearDown=BackendTests.tearDown
+    def test_sos_retry_and_batch_idempotency(self):
+        path='/api/v1/devices/'+self.device
+        self.assertEqual(self.client.post(path+'/sos',json={'client_request_id':'one'}).status_code,401)
+        first=self.client.post(path+'/sos',headers=self.auth,json={'client_request_id':'one'}).json()['data']
+        again=self.client.post(path+'/sos',headers=self.auth,json={'client_request_id':'one'}).json()['data']
+        self.assertEqual(first,again)
+        key=str(first['boot_id'])+':'+str(first['event_id'])
+        self.assertEqual(first['source'],'app')
+        body={'event_keys':[key],'note':'已联系本人确认安全','resolution':'handled'}
+        missing={**body,'event_keys':[key,'missing']}
+        self.assertEqual(self.client.post(path+'/alarms/batch-notes',headers=self.auth,json=missing).status_code,404)
+        self.assertEqual(self.client.get(path+'/alarms/'+key+'/notes',headers=self.auth).json()['data']['items'],[])
+        one=self.client.post(path+'/alarms/batch-notes',headers=self.auth,json=body)
+        self.assertEqual(one.status_code,200)
+        self.assertEqual(one.json()['data']['handled_keys'],[key])
+        two=self.client.post(path+'/alarms/batch-notes',headers=self.auth,json=body)
+        self.assertEqual(two.json()['data']['handled_keys'],[])
+        self.assertEqual(len(self.client.get(path+'/alarms/'+key+'/notes',headers=self.auth).json()['data']['items']),1)
+        self.assertEqual(self.client.post('/api/v1/devices/other/sos',headers=self.auth,json={'client_request_id':'x'}).status_code,404)
+    def test_two_clients_and_reconnect_see_saved_handling(self):
+        path='/api/v1/devices/'+self.device
+        def socket_url():
+            ticket=self.client.post('/api/v1/ws-ticket?device_id='+self.device,headers=self.auth).json()['data']['ticket']
+            return '/api/v1/ws?device_id='+self.device+'&ticket='+ticket
+        with self.client.websocket_connect(socket_url()) as one,self.client.websocket_connect(socket_url()) as two:
+            self.assertEqual(one.receive_json()['type'],'hello')
+            self.assertEqual(two.receive_json()['type'],'hello')
+            event=self.client.post(path+'/sos',headers=self.auth,json={'client_request_id':'multi'}).json()['data']
+            self.assertEqual(one.receive_json()['type'],'alarm')
+            self.assertEqual(two.receive_json()['type'],'alarm')
+            key=str(event['boot_id'])+':'+str(event['event_id'])
+            self.client.post(path+'/alarms/batch-notes',headers=self.auth,json={'event_keys':[key],'note':'联系本人确认','resolution':'handled'})
+            self.assertEqual(one.receive_json()['type'],'alarm_note')
+            self.assertEqual(two.receive_json()['type'],'alarm_note')
+        # Simulate a disconnected client's authoritative catch-up after reconnect.
+        with self.client.websocket_connect(socket_url()) as reconnected:
+            self.assertEqual(reconnected.receive_json()['type'],'hello')
+            rows=self.client.get(path+'/alarms',headers=self.auth).json()['data']['items']
+            found=next(row for row in rows if row['event_id']==event['event_id'])
+            self.assertEqual(found['handling']['resolution'],'handled')

@@ -10,6 +10,9 @@ export interface AlarmSnapshot {
 
 function alarmState(item: AlarmEvent, records: AlarmEvent[], snapshot: AlarmSnapshot,
   acknowledged: string[]): string {
+  if (item.source === 'wearable' || item.source === 'app') {
+    return item.handling && item.handling.resolution !== 'follow_up' ? 'handled' : 'active';
+  }
   if (item.phase === 'end') { return 'ended'; }
   if (acknowledged.indexOf(alarmKey(item)) >= 0) { return 'acknowledged'; }
   if (snapshot.bootId >= 0 && item.boot_id < snapshot.bootId) { return 'historical'; }
@@ -25,10 +28,14 @@ function alarmState(item: AlarmEvent, records: AlarmEvent[], snapshot: AlarmSnap
 export function alarmStateLabel(item: AlarmEvent, records: AlarmEvent[], snapshot: AlarmSnapshot,
   acknowledged: string[]): string {
   const state = alarmState(item, records, snapshot, acknowledged);
+  if (state === 'handled') { return '已处置'; }
+  if (item.source === 'app') { return item.handling ? '待跟进' : 'App 主动呼救待响应'; }
+  if (item.source === 'wearable') { return item.handling ? '待跟进' : '手表跌倒待核实'; }
   if (state === 'ended') { return '已结束'; }
   if (state === 'acknowledged') { return '已确认，待结束同步'; }
   if (state === 'historical') { return '历史记录待核实'; }
   if (state === 'recovered') { return '设备已恢复，结束记录待同步'; }
+  if(item.handling && item.handling.resolution!=='follow_up'){return '已处理 · '+(snapshot.fresh?'异常仍在':'状态待核实');}
   return snapshot.fresh ? '报警中' : '报警待核实';
 }
 
