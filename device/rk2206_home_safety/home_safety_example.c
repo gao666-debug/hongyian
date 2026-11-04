@@ -58,7 +58,7 @@ static int net_mode_auto_pick(void);
 
 #define MSG_QUEUE_LENGTH 2
 #define LOOP_INTERVAL_MS 200 /* 采集/判断周期 */
-#define SHT30_EVERY 5        /* 每 5 拍读一次温湿度(约 1s) */
+#define ENV_READ_INTERVAL_MS 500 /* Deadline-based polling; no tick-count drift. */
 #define GAS_EVERY 2          /* 每 2 拍读一次燃气(约 400ms) */
 #define PRINT_EVERY_LOOPS 10 /* 每 10 拍打印一次状态(约 2s) */
 #define IMU_BURST_COUNT 1    /* Fixed gateway: health sample only; no human-fall burst sampling. */
@@ -156,6 +156,7 @@ static void sensor_read_thread(void *arg)
 {
     unsigned int tick = 0;
     uint64_t last_retry = 0;
+    uint64_t next_env_read = 0;
     monitor_env_t env_cache = {0};
     ui_sensor_progress("SHT-INIT");
     sht30_init();
@@ -175,8 +176,9 @@ static void sensor_read_thread(void *arg)
         body_induction_diagnostics(&body_diag);
         g_sample.body_valid = body_diag.filtered_valid;
         g_sample.body = body_diag.filtered_active;
-        if (tick % SHT30_EVERY == 0)
+        if (LOS_TickCountGet() >= next_env_read)
         {
+            next_env_read = LOS_TickCountGet() + ENV_READ_INTERVAL_MS;
             double t[2] = {0};
             ui_sensor_progress("SHT-READ");
             bool read_ok = sht30_read_data(t) == 0;
@@ -546,6 +548,9 @@ static void safety_monitor_thread(void *arg)
         state.imu_valid = v->imu_valid;
         state.mute = any && !beep;
         state.sample_up = v->sample_up;
+        /* The LCD receives this exact local frame, not the global copy that
+         * safety_state_set marks internally. Keep both publication paths valid. */
+        state.sample_received = 1;
         safety_state_set(&state);
         for (int i = 0; i < 5; ++i) {
             if (rising & (1U << i)) mqtt_alarm_event(i + 1, values[i], ids[i], 0, 0);

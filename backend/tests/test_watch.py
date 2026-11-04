@@ -44,6 +44,13 @@ class NormalizeTests(unittest.TestCase):
         self.assertFalse(data['hr_measuring'])
         self.assertEqual(data['heart_rate'], 0)
 
+    def test_battery_only_when_reported(self):
+        self.assertIsNone(watch_model.normalize({'heart_rate':0})['battery_percent'])
+        self.assertEqual(watch_model.normalize({'heart_rate':0,'battery_percent':0})['battery_percent'],0)
+        self.assertEqual(watch_model.normalize({'heart_rate':70,'battery_percent':82})['battery_percent'],82)
+        with self.assertRaises(watch_model.WatchReportError):
+            watch_model.normalize({'heart_rate':70,'battery_percent':101})
+
     def test_rejects_out_of_range_and_non_numeric(self):
         for bad in ({'heart_rate': 500}, {'spo2': 130}, {'steps': -1},
                     {'fall_state': 9}, {'accel_z': 99999}, {'heart_rate': 'abc'},
@@ -112,7 +119,7 @@ class WatchApiTests(unittest.TestCase):
         self.post_watch()
         pushed.clear()
         self.assertEqual(self.post_watch({**self.properties, 'fall_state': 2, 'fall_count': 1}).status_code, 200)
-        self.assertEqual(sorted(event['type'] for event in pushed), ['watch', 'watch_fall'])
+        self.assertEqual(sorted(event['type'] for event in pushed), ['alarm', 'watch', 'watch_fall'])
         self.assertEqual(pushed[0]['simulated'], True if self.settings.mode == 'mock' else False)
         events = self.client.get('/api/v1/devices/%s/watch/falls' % self.device,
                                  headers=self.auth).json()['data']['items']
@@ -123,6 +130,34 @@ class WatchApiTests(unittest.TestCase):
         events = self.client.get('/api/v1/devices/%s/watch/falls' % self.device,
                                  headers=self.auth).json()['data']['items']
         self.assertEqual(len(events), 1)
+
+    def test_wearable_alarm_handling_survives_and_is_not_mainboard_ack(self):
+        self.post_watch()
+        self.post_watch({**self.properties,'fall_state':2,'fall_count':1})
+        endpoint='/api/v1/devices/'+self.device+'/alarms'
+        items=self.client.get(endpoint,headers=self.auth).json()['data']['items']
+        alarm=next(a for a in items if a.get('source')=='wearable')
+        key=f"{alarm['boot_id']}:{alarm['event_id']}"
+        self.assertEqual(alarm['code'],2)
+        self.post_watch({**self.properties,'fall_state':2,'fall_count':1})
+        self.assertEqual(len(self.client.get(endpoint,headers=self.auth).json()['data']['items']),len(items))
+        response=self.client.post(endpoint+'/'+key+'/notes',headers=self.auth,json={'note':'已联系家人查看','resolution':'handled'})
+        self.assertEqual(response.status_code,201)
+        updated=self.client.get(endpoint,headers=self.auth).json()['data']['items']
+        self.assertEqual(next(a for a in updated if a['event_id']==alarm['event_id'])['handling']['resolution'],'handled')
+        # Falling count may reset after reboot; the server incident sequence must not.
+        self.post_watch({**self.properties,'fall_state':0,'fall_count':0})
+        self.post_watch({**self.properties,'fall_state':2,'fall_count':1})
+        wearable=[a for a in self.client.get(endpoint,headers=self.auth).json()['data']['items'] if a.get('source')=='wearable']
+        self.assertEqual(len(wearable),2)
+        self.assertNotEqual(wearable[0]['event_id'],wearable[1]['event_id'])
+
+    def test_large_counter_jump_is_one_observation_batch(self):
+        self.post_watch()
+        self.assertEqual(self.post_watch({**self.properties,'fall_count':1000000}).status_code,200)
+        events=self.client.get('/api/v1/devices/'+self.device+'/watch/falls',headers=self.auth).json()['data']['items']
+        self.assertEqual(len(events),1)
+        self.assertEqual(events[0]['new_count'],1000000)
 
     def test_invalid_report_is_rejected(self):
         self.assertEqual(self.post_watch({'heart_rate': 9000}).status_code, 422)

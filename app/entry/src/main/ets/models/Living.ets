@@ -11,6 +11,8 @@ export function nightLabel(s: LivingStatus | null, fresh: boolean): string {
   if (!s || !fresh) { return '状态待更新'; }
   if (s.light_owner === 'alarm') { return '报警灯优先'; }
   if (s.light_owner === 'medicine') { return '服药提醒中'; }
+  if (s.light_mode === 1) { return s.night_on ? '手动 · 已亮灯' : '手动开灯待同步'; }
+  if (s.light_mode === 0) { return s.night_on ? '手动关灯待同步' : '手动 · 已关闭'; }
   if (!s.night_auto) { return '自动夜灯未开启'; }
   if (!s.light_valid) { return '光照检测不可用'; }
   return s.night_on ? '自动 · 已亮灯' : '自动 · 待机';

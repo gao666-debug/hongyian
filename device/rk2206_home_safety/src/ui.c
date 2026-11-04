@@ -38,38 +38,57 @@ void ui_sensor_progress(const char *stage)
     s_sensor_stage=stage;
 }
 
-/* 主界面：标题 + 两栏(5 行 x 2 列 = 10 项) */
-#define NCELL   12
-#define COL_X0  4
-#define COL_X1  164
-#define ROW_Y0  48
-#define ROW_STEP 30
-#define VAL_DX  52
-#define COL_W   156
+/* 320x240 overview: safety first, four large readings, fixed power information. */
+#define UI_BLUE 0x2AD1
+#define UI_INK 0x21A9
+#define UI_MUTED 0x63B0
+#define UI_LINE 0xD73D
+#define UI_BG 0xF7BF
+#define UI_RED 0xC228
+#define UI_AMBER 0x82A4
+#define UI_GOOD 0x2C70
+static char s_overview[12][80];
+static uint16_t s_overview_color[12];
+typedef struct { char from[80]; int from_size,to_size,active,step; uint64_t start; } metric_anim_t;
+static metric_anim_t s_metric[4];
+static void metric_animate(void)
+{
+    uint64_t now=LOS_TickCountGet();
+    for(int i=0;i<4;i++) {
+        metric_anim_t *a=&s_metric[i];
+        if(!a->active)continue;
+        unsigned elapsed=(unsigned)(now-a->start);
+        int step=elapsed>=240?32:(int)(elapsed*32/240);
+        if(step==a->step)continue;
+        a->step=step;
+        lcd_metric_slide(121+(i%2)*102,75+(i/2)*82,a->from,s_overview[6+i],
+                         a->from_size,a->to_size,step,UI_INK,LCD_WHITE);
+        if(step==32)a->active=0;
+    }
+}
+static int __attribute__((unused)) metric_active(void)
+{
+    for(int i=0;i<4;i++)if(s_metric[i].active)return 1;
+    return 0;
+}
 
-static const char *s_labels[NCELL] = {
-    "温度", "湿度", "人体", "燃气", "光照",
-    "烟雾", "跌倒", "求助", "房门", "状态", "夜灯", "服药"
-};
-
-/* 上一次各单元文本，用于只重画变化项 */
-static char s_prev[NCELL][40];
-static bool s_prev_valid = false;
 static char s_network_prev[48];
 /* Main/event pages invalidate these caches. Re-entering a page clears once;
  * subsequent calls touch only rows whose displayed text or color changed. */
 static int s_draw_page = -1;
-static char s_page_rows[9][64];
-static uint16_t s_page_colors[9];
+static char s_page_rows[16][96];
+static uint16_t s_page_colors[16],s_page_backgrounds[16];
 static int page_begin(int page)
 {
     if (s_draw_page == page) return 0;
     s_draw_page = page;
     memset(s_page_rows, 0, sizeof(s_page_rows));
     memset(s_page_colors, 0, sizeof(s_page_colors));
+    memset(s_page_backgrounds, 0, sizeof(s_page_backgrounds));
     lcd_fill(0, 0, LCD_W, LCD_H, LCD_WHITE);
     return 1;
 }
+#if KEY_ADC_DIAGNOSTIC
 static void page_row(int row, int y, const char *text, uint16_t color, int size, int chinese)
 {
     if (!strcmp(s_page_rows[row], text) && s_page_colors[row] == color) return;
@@ -78,6 +97,27 @@ static void page_row(int row, int y, const char *text, uint16_t color, int size,
     else lcd_show_string(4,y,(uint8_t*)text,color,LCD_WHITE,size,0);
     snprintf(s_page_rows[row],sizeof(s_page_rows[row]),"%s",text);
     s_page_colors[row] = color;
+}
+
+#endif
+static int panel_begin(int page,const char *title,const char *marker)
+{
+    if(!page_begin(page))return 0;
+    lcd_fill(0,25,LCD_W,LCD_H,UI_BG);
+    lcd_fill(0,0,LCD_W,25,UI_BLUE);
+    lcd_show_chinese(8,4,(uint8_t*)title,LCD_WHITE,UI_BLUE,16,0);
+    lcd_show_chinese(256,4,(uint8_t*)marker,LCD_WHITE,UI_BLUE,16,0);
+    return 1;
+}
+static int panel_text(int row,int x,int y,int width,int height,const char *text,
+                       uint16_t fg,uint16_t bg,int size)
+{
+    if(!strcmp(s_page_rows[row],text)&&s_page_colors[row]==fg&&s_page_backgrounds[row]==bg)return 0;
+    lcd_fill(x,y,x+width,y+height,bg);
+    lcd_show_chinese(x+4,y+(height-size)/2,(uint8_t*)text,fg,bg,size,0);
+    snprintf(s_page_rows[row],sizeof(s_page_rows[row]),"%s",text);
+    s_page_colors[row]=fg;s_page_backgrounds[row]=bg;
+    return 1;
 }
 
 
@@ -119,23 +159,84 @@ static void draw_network_status(void)
     }
 }
 
-static int cell_x(int i) { return (i % 2 == 0) ? COL_X0 : COL_X1; }
-static int cell_y(int i) { return ROW_Y0 + ROW_STEP * (i / 2); }
-static bool cell_is_ascii(int i) { return (i == 0 || i == 1 || i == 3 || i == 4); }
+static void metric_icon(int kind,int x,int y)
+{
+    uint16_t color=UI_BLUE;
+    if(kind==0) {
+        lcd_draw_line(x+4,y+1,x+4,y+10,color);lcd_draw_line(x+8,y+1,x+8,y+10,color);
+        lcd_draw_line(x+4,y+1,x+8,y+1,color);lcd_draw_circle(x+6,y+12,4,color);
+    } else if(kind==1) {
+        lcd_draw_line(x+6,y,x+1,y+8,color);lcd_draw_line(x+6,y,x+11,y+8,color);
+        lcd_draw_line(x+1,y+8,x+1,y+12,color);lcd_draw_line(x+11,y+8,x+11,y+12,color);
+        lcd_draw_line(x+1,y+12,x+6,y+15,color);lcd_draw_line(x+11,y+12,x+6,y+15,color);
+    } else if(kind==2) {
+        lcd_draw_circle(x+6,y+8,3,color);
+        lcd_draw_line(x+6,y,x+6,y+3,color);lcd_draw_line(x+6,y+13,x+6,y+16,color);
+        lcd_draw_line(x,y+8,x+1,y+8,color);lcd_draw_line(x+11,y+8,x+13,y+8,color);
+        lcd_draw_line(x+1,y+2,x+3,y+4,color);lcd_draw_line(x+10,y+12,x+12,y+14,color);
+    } else {
+        for(int i=0;i<3;i++) {
+            lcd_draw_line(x+i*4,y+14,x+i*4,y+10,color);
+            lcd_draw_line(x+i*4,y+10,x+i*4+2,y+6,color);
+            lcd_draw_line(x+i*4+2,y+6,x+i*4+2,y+2,color);
+        }
+    }
+}
 
 static void draw_static(void)
 {
-    s_draw_page = 0;
-    int i;
-    lcd_fill(0, 0, LCD_W, LCD_H, LCD_WHITE);
-    lcd_show_chinese(88, 2, (uint8_t *)"居家安全监测", LCD_WHITE, LCD_RED, 24, 0);
-    for (i = 0; i < NCELL; i++)
-    {
-        lcd_show_chinese(cell_x(i), cell_y(i), (uint8_t *)s_labels[i], LCD_BLACK, LCD_WHITE, 24, 0);
+    s_draw_page=0;
+    memset(s_overview,0,sizeof(s_overview));
+    memset(s_metric,0,sizeof(s_metric));
+    memset(s_overview_color,0,sizeof(s_overview_color));
+    lcd_fill(0,0,LCD_W,LCD_H,UI_BG);
+    lcd_fill(0,0,LCD_W,25,UI_BLUE);
+    lcd_show_chinese(8,4,(uint8_t*)"颐鸿安",LCD_WHITE,UI_BLUE,16,0);
+    lcd_show_chinese(144,4,(uint8_t*)"居家安全守护",LCD_WHITE,UI_BLUE,16,0);
+    lcd_fill(4,49,109,211,LCD_WHITE);
+    lcd_draw_rectangle(4,49,108,210,UI_LINE);
+    lcd_show_chinese(12,55,(uint8_t*)"安全状态",UI_BLUE,LCD_WHITE,16,0);
+    const char *labels[]={"温度","湿度","光照","烟气估算"};
+    const char *units[]={"C","%","lx","参考ppm"};
+    for(int i=0;i<4;i++) {
+        int x=114+(i%2)*102,y=49+(i/2)*82;
+        lcd_fill(x,y,x+98,y+79,LCD_WHITE);
+        lcd_draw_rectangle(x,y,x+97,y+78,UI_LINE);
+        lcd_show_chinese(x+7,y+5,(uint8_t*)labels[i],UI_MUTED,LCD_WHITE,16,0);
+        lcd_show_chinese(x+7,y+59,(uint8_t*)units[i],UI_MUTED,LCD_WHITE,16,0);
+        metric_icon(i,x+80,y+5);
     }
-    s_prev_valid = false;
-    s_network_prev[0] = 0;
+    s_network_prev[0]=0;
     draw_network_status();
+}
+
+/* Cache the displayed string AND its color: an alarm priority change must not
+ * cause a full-screen clear, nor leave an old red indicator behind. */
+static void overview_text(int id,int x,int y,int width,int size,const char *text,uint16_t color,uint16_t bg)
+{
+    if(!strcmp(s_overview[id],text)&&s_overview_color[id]==color)return;
+    if(id>=6 && id<=9) {
+        metric_anim_t *a=&s_metric[id-6];
+        /* First frame, invalid/cache markers and interrupted animations snap:
+         * never keep a stale or imaginary intermediate sensor value. */
+        if(s_overview[id][0] && text[0]!='-' && 
+           s_overview[id][0]!='-' && !a->active) {
+            snprintf(a->from,sizeof(a->from),"%s",s_overview[id]);
+            a->from_size=strlen(a->from)<=5?32:24;a->to_size=size;
+            a->start=LOS_TickCountGet();a->step=-1;a->active=1;
+            snprintf(s_overview[id],sizeof(s_overview[id]),"%s",text);
+            s_overview_color[id]=color;
+            return;
+        }
+        a->active=0;
+    }
+    if(id>=1 && id<=5) {
+        lcd_fill(10,y+6,14,y+10,color);x=18;width=88;
+    }
+    lcd_fill(x,y,x+width,y+((id>=6 && id<=9)?32:size),bg);
+    lcd_show_chinese(x,y,(uint8_t*)text,color,bg,size,0);
+    snprintf(s_overview[id],sizeof(s_overview[id]),"%s",text);
+    s_overview_color[id]=color;
 }
 
 void ui_init(void)
@@ -167,130 +268,59 @@ static void epoch_to_mdhm(unsigned int local, int *mo, int *dd, int *hh, int *mi
     *mi = (int)((rem / 60) % 60);
 }
 
+/* Eight compact records per page, stable event snapshots instead of parsing
+ * formatted strings. Zero duration means unknown/instant, never proof of recovery. */
 void ui_show_events(int page)
 {
-    s_draw_page = 1;
-    int i;
-    int base = page * 8;
-    char pg[8];
-
-    lcd_fill(0, 0, LCD_W, LCD_H, LCD_WHITE);
-    lcd_show_chinese(112, 2, (uint8_t *)"事件记录", LCD_WHITE, LCD_RED, 24, 0);
-    snprintf(pg, sizeof(pg), "%d/2", page + 1);
-    lcd_show_string(262, 6, (uint8_t *)pg, LCD_RED, LCD_WHITE, 16, 0);
-    lcd_draw_line(0, 30, LCD_W - 1, 30, LCD_BLACK);
-
-    for (i = 0; i < 8; i++)
-    {
-        char line[48];
-        char tag[16];
-        char tbuf[16];
-        unsigned int up = 0;
-        int dur = 0;
-        const char *p;
-        int t = 0;
-        int y = 34 + i * 25;
-
-        if (!event_log_get(base + i, line, sizeof(line)))
-        {
-            break;
-        }
-
-        /* 解析 "up=<秒>s <TAG> <值> d=<持续秒>" */
-        p = line;
-        if (strncmp(p, "up=", 3) == 0)
-        {
-            p += 3;
-            up = (unsigned int)atoi(p);
-            while (*p != 0 && *p != 's') { p++; }
-            if (*p == 's') { p++; }
-            while (*p == ' ') { p++; }
-        }
-        while (*p != 0 && *p != ' ' && t < (int)sizeof(tag) - 1)
-        {
-            tag[t++] = *p++;
-        }
-        tag[t] = 0;
-        {
-            const char *d = strstr(line, "d=");
-            if (d != NULL)
-            {
-                dur = atoi(d + 2);
+    safety_event_t entries[16];
+    safety_state_t state;living_status_t life;
+    int count=event_log_snapshot(entries),base=page*8;
+    safety_state_get(&state);living_get(&life);
+    char text[96],marker[12];
+    snprintf(marker,sizeof(marker),"%d/2",page+1);
+    panel_begin(10+page,"颐鸿安 / 事件记录",marker);
+    snprintf(text,sizeof(text),"最近%d条 / 最多16条  北京时间",count);
+    panel_text(8,4,28,312,18,text,UI_MUTED,UI_BG,16);
+    for(int row=0;row<8;row++) {
+        int index=base+row,y=49+row*20;
+        char signature[96]="",time_text[24]="",state_text[20]="";
+        uint16_t fg=UI_INK,bg=row%2?UI_BG:LCD_WHITE;
+        const char *name="";
+        if(index<count) {
+            safety_event_t *e=&entries[index];name=event_log_tag_cn(e->tag);
+            int active=0;
+            if(e->boot==safety_boot_id()) {
+                if(!strcmp(e->tag,"HELP"))active=state.help;
+                else if(!strcmp(e->tag,"FALL"))active=state.fall;
+                else if(!strcmp(e->tag,"GAS"))active=state.gas_alarm;
+                else if(!strcmp(e->tag,"NOACT"))active=state.status==4;
+                else if(!strcmp(e->tag,"ENV"))active=state.status==5;
+                else if(!strcmp(e->tag,"MED_DUE") && e->val>=1 && e->val<=3)active=life.slot_state[e->val-1]==3;
+                for(int i=0;i<index;i++)if(!strcmp(entries[i].tag,e->tag) && (strcmp(e->tag,"MED_DUE") || entries[i].val==e->val)){active=0;break;}
             }
+            int alarm_tag=!strcmp(e->tag,"HELP")||!strcmp(e->tag,"FALL")||!strcmp(e->tag,"GAS")||!strcmp(e->tag,"NOACT")||!strcmp(e->tag,"ENV");
+            snprintf(state_text,sizeof(state_text),"%s",active?"报警中":e->dur>0?"已结束":alarm_tag?"待核实":"已记录");
+            if(active)fg=UI_RED;
+            if(e->epoch) {
+                int mo,dd,hh,mi;epoch_to_mdhm(e->epoch+8*3600,&mo,&dd,&hh,&mi);
+                snprintf(time_text,sizeof(time_text),"%02d-%02d %02d:%02d",mo,dd,hh,mi);
+            } else snprintf(time_text,sizeof(time_text),"开机%um%us",e->up/60,e->up%60);
+            snprintf(signature,sizeof(signature),"%u:%s:%s:%s",e->id,name,time_text,state_text);
         }
-
-        /* 名称(24px) + 时间(16px) + 时长(16px) */
-        lcd_show_chinese(4, y, (uint8_t *)event_log_tag_cn(tag), LCD_BLACK, LCD_WHITE, 24, 0);
-        {
-            const char *de = strstr(line, "e=");
-            unsigned int epoch = (de != NULL) ? (unsigned int)atoi(de + 2) : 0;
-            if (epoch > 0)
-            {
-                int mo, dd, hh, mi;
-                epoch_to_mdhm(epoch + 8 * 3600, &mo, &dd, &hh, &mi);   /* 东八区 UTC+8 */
-                snprintf(tbuf, sizeof(tbuf), "%02d-%02d %02d:%02d", mo, dd, hh, mi);
+        if(row==0 && index>=count){snprintf(signature,sizeof(signature),"empty");fg=UI_MUTED;}
+        if(strcmp(s_page_rows[row],signature)||s_page_colors[row]!=fg) {
+            lcd_fill(4,y,316,y+20,bg);
+            if(index<count) {
+                lcd_show_chinese(9,y+2,(uint8_t*)name,fg,bg,16,0);
+                lcd_show_chinese(91,y+2,(uint8_t*)time_text,UI_MUTED,bg,16,0);
+                lcd_show_chinese(257,y+2,(uint8_t*)state_text,fg,bg,16,0);
             }
-            else
-            {
-                snprintf(tbuf, sizeof(tbuf), "%u:%02u", up / 60, up % 60);  /* 未对时: 开机时长 */
-            }
+            else if(row==0)lcd_show_chinese(9,y+2,(uint8_t*)"本页暂无记录",UI_MUTED,bg,16,0);
+            snprintf(s_page_rows[row],sizeof(s_page_rows[row]),"%s",signature);s_page_colors[row]=fg;
         }
-        lcd_show_string(108, y + 4, (uint8_t *)tbuf, LCD_GRAY, LCD_WHITE, 16, 0);
-        snprintf(tbuf, sizeof(tbuf), "%ds", dur);
-        lcd_show_string(208, y + 4, (uint8_t *)tbuf, LCD_GRAY, LCD_WHITE, 16, 0);
     }
-}
-
-static void cell_text(int i, char *out, int n,
-                      double temp, double humi, bool body, double gas_ppm, double light,
-                      bool smoke, bool fall_suspect, bool help_on, bool door_open,
-                      const char *status, const safety_state_t *view,
-                      const living_status_t *life)
-{
-    if ((i == 0 || i == 1) && !view->env_valid) { snprintf(out,n,"N/A"); return; }
-    if (i == 8 && !view->door_valid) { snprintf(out,n,"--"); return; }
-    switch (i)
-    {
-    case 0: snprintf(out, n, "%s%.1f C", view->env_cached ? "~" : "", temp); break;
-    case 1: snprintf(out, n, "%s%.1f %%", view->env_cached ? "~" : "", humi); break;
-    case 2: snprintf(out, n, "%s", !view->body_valid ? "待确认" : body ? "有活动" : "无活动"); break;
-    case 3: snprintf(out, n, "%.0f ppm", gas_ppm); break;
-    case 4: snprintf(out, n, "%.0f lx", light); break;
-    case 5: snprintf(out, n, "%s", smoke ? "报警" : "正常"); break;
-    case 6: snprintf(out, n, "%s", "未开启"); break;
-    case 7: snprintf(out, n, "%s", help_on ? "开" : "关"); break;
-    case 8: snprintf(out, n, "%s", door_open ? "开" : "关"); break;
-    case 9: snprintf(out, n, "%s", status); break;
-    case 10: snprintf(out,n,"%s",life->light_owner==3?"报警":life->light_owner==2?"提醒":life->night_on?"亮":life->config.night_auto?"自动":"关");break;
-    case 11: snprintf(out,n,"%s",living_medicine_text(living_pending_slot(life)>=0?3:life->medicine_state));break;
-    default: out[0] = 0; break;
-    }
-}
-
-static void cell_draw(int i, const char *txt,
-                      bool smoke, bool fall_suspect, bool help_on, bool alarmed)
-{
-    int x = cell_x(i) + VAL_DX;
-    int y = cell_y(i);
-    int x_end = cell_x(i) + COL_W;
-    uint16_t fc = LCD_BLACK;
-
-    if (x_end >= LCD_W) { x_end = LCD_W - 1; }
-    lcd_fill(cell_x(i) + VAL_DX, y, x_end, y + 23, LCD_WHITE);
-
-    if (i == 5) { fc = smoke ? LCD_RED : LCD_BLACK; }
-    else if (i == 6) { fc = fall_suspect ? LCD_RED : LCD_BLACK; }
-    else if (i == 7) { fc = help_on ? LCD_RED : LCD_BLACK; }
-    else if (i == 9) { fc = alarmed ? LCD_RED : LCD_BLACK; }
-
-    if (cell_is_ascii(i))
-    {
-        lcd_show_string(x, y, (uint8_t *)txt, fc, LCD_WHITE, 24, 0);
-    }
-    else
-    {
-        lcd_show_chinese(x, y, (uint8_t *)txt, fc, LCD_WHITE, 24, 0);
-    }
+    const char *hint=state.alarm?"K6确认当前报警 K4消音 K5翻页":living_pending_slot(&life)>=0?"K6确认服药 K5翻页":"长按K6清记录 K5翻页";
+    panel_text(10,4,215,312,22,hint,UI_BLUE,UI_BG,16);
 }
 
 static void ui_update_snapshot(double temp, double humi, bool body, double gas_ppm, double light,
@@ -298,37 +328,41 @@ static void ui_update_snapshot(double temp, double humi, bool body, double gas_p
                bool alarmed, const char *status, const safety_state_t *view,
                const living_status_t *life)
 {
-    int i;
-    char cur[NCELL][40];
+    (void)fall_suspect;(void)door_open;(void)status;
     draw_network_status();
-
-    for (i = 0; i < NCELL; i++)
-    {
-        cell_text(i, cur[i], sizeof(cur[i]), temp, humi, body, gas_ppm, light,
-                  smoke, fall_suspect, help_on, door_open, status, view, life);
+    char text[80];
+    safety_quality_t quality;
+    safety_state_quality(view,(unsigned int)(LOS_TickCountGet()/1000),&quality);
+    int stale=quality.stale || !view->sample_received;
+    int unknown=stale || !quality.env_available || !view->body_valid;
+    const char *headline=help_on?"求助中":alarmed?(view->status==3?"烟气异常":view->status==4?"活动异常":view->status==5?"环境异常":"有异常"):unknown?"待核实":"正常";
+    uint16_t risk=alarmed||help_on?UI_RED:unknown?UI_AMBER:UI_GOOD;
+    if(s_overview_color[0]!=risk)lcd_draw_rectangle(4,49,108,210,risk);
+    overview_text(0,9,78,96,24,headline,risk,LCD_WHITE);
+    if(stale || !view->body_valid)snprintf(text,sizeof(text),"人体 待确认");
+    else snprintf(text,sizeof(text),"人体 %s",body?"有活动":"无活动");
+    overview_text(1,10,108,96,16,text,stale||!view->body_valid?UI_AMBER:body?UI_BLUE:UI_MUTED,LCD_WHITE);
+    snprintf(text,sizeof(text),"求助 %s",stale?"待确认":help_on?"报警":"正常");
+    overview_text(2,10,128,96,16,text,stale?UI_AMBER:help_on?UI_RED:UI_GOOD,LCD_WHITE);
+    snprintf(text,sizeof(text),"烟气 %s",stale?"待确认":smoke||view->gas_alarm?"报警":"正常");
+    overview_text(3,10,148,96,16,text,stale?UI_AMBER:smoke||view->gas_alarm?UI_RED:UI_GOOD,LCD_WHITE);
+    snprintf(text,sizeof(text),"夜灯 %s",life->light_owner==3?"报警":life->light_owner==2?"提醒":life->night_on?"开启":"关闭");
+    overview_text(4,10,168,96,16,text,UI_INK,LCD_WHITE);
+    snprintf(text,sizeof(text),"服药 %s",living_medicine_text(living_pending_slot(life)>=0?3:life->medicine_state));
+    overview_text(5,10,188,96,16,text,living_pending_slot(life)>=0?UI_AMBER:UI_INK,LCD_WHITE);
+    for(int i=0;i<4;i++) {
+        if(stale || (i<2 && !quality.env_available))snprintf(text,sizeof(text),"--");
+        else if(i<2)snprintf(text,sizeof(text),"%.1f",i==0?temp:humi);
+        else snprintf(text,sizeof(text),"%.0f",i==2?light:gas_ppm);
+        overview_text(6+i,121+(i%2)*102,75+(i/2)*82,84,strlen(text)<=5?32:24,text,UI_INK,LCD_WHITE);
     }
-
-    if (!s_prev_valid)
-    {
-        for (i = 0; i < NCELL; i++)
-        {
-            cell_draw(i, cur[i], smoke, fall_suspect, help_on, alarmed);
-            strncpy(s_prev[i], cur[i], sizeof(s_prev[i]) - 1);
-            s_prev[i][sizeof(s_prev[i]) - 1] = 0;
-        }
-        s_prev_valid = true;
-        return;
-    }
-
-    for (i = 0; i < NCELL; i++)
-    {
-        if (strcmp(cur[i], s_prev[i]) != 0)
-        {
-            cell_draw(i, cur[i], smoke, fall_suspect, help_on, alarmed);
-            strncpy(s_prev[i], cur[i], sizeof(s_prev[i]) - 1);
-            s_prev[i][sizeof(s_prev[i]) - 1] = 0;
-        }
-    }
+    safety_event_t entry;int count=0;
+    while(count<16 && event_log_entry(count,&entry))count++;
+    if(stale || !view->body_valid)snprintf(text,sizeof(text),"活动待确认  记录%d",count);
+    else if(view->inactive>=3600)snprintf(text,sizeof(text),"无活动%dh  记录%d",view->inactive/3600,count);
+    else snprintf(text,sizeof(text),"无活动%ds  记录%d",view->inactive,count);
+    overview_text(10,5,215,207,16,text,UI_MUTED,UI_BG);
+    overview_text(11,218,215,100,16,"外接电源",UI_BLUE,UI_BG);
 }
 
 
@@ -344,50 +378,72 @@ void ui_update(double temp, double humi, bool body, double gas_ppm, double light
 
 void ui_show_diagnostics(void)
 {
-    char lines[9][48],ip[16]="";WifiLinkedInfo li;safety_state_t state;safety_config_t cfg;
-    safety_state_get(&state);safety_config_get(&cfg);memset(&li,0,sizeof(li));
-    if(net_get_mode()==NET_MODE_AP)strcpy(ip,"192.168.2.1");
-    else if(GetLinkedInfo(&li)==WIFI_SUCCESS&&li.ipAddress){ip4_addr_t a;a.addr=li.ipAddress;ip4addr_ntoa_r(&a,ip,sizeof(ip));}
-    snprintf(lines[0],sizeof(lines[0]),"设备状态 %s",SAFETY_FW);
-    snprintf(lines[1],sizeof(lines[1]),"模式: %s",net_get_mode()==NET_MODE_AP?"本地热点":"联网模式");
-    snprintf(lines[2],sizeof(lines[2]),"地址: %s:8080",ip[0]?ip:"未连接");
-    snprintf(lines[3],sizeof(lines[3]),"云端: %s",net_get_mode()==NET_MODE_AP?"本地模式":safety_mqtt_is_connected()?"已连接":"未连接");
-    snprintf(lines[4],sizeof(lines[4]),"温湿度:%s",state.env_valid?"正常":"异常");
-    snprintf(lines[5],sizeof(lines[5]),"人体:%s",!state.body_valid?"待确认":state.body?"有活动":"无活动");
-    snprintf(lines[6],sizeof(lines[6]),"无活动:%u秒",state.inactive);
-    living_status_t life;living_get(&life);
-    snprintf(lines[7],sizeof(lines[7]),"夜灯:%s 服药:%s",life.night_on?"开启":"关闭",living_medicine_text(life.medicine_state));
-    snprintf(lines[8],sizeof(lines[8]),"K5翻页  长按K5切换网络");
-#if KEY_ADC_DIAGNOSTIC
-    snprintf(lines[5],sizeof(lines[5]),"KEY ADC %.3fV",key_last_voltage());
-    snprintf(lines[6],sizeof(lines[6]),"K3 K4 K5 K6: read voltage");
-    snprintf(lines[7],sizeof(lines[7]),"KEY ACTIONS OFF / WDT ON");
-    snprintf(lines[8],sizeof(lines[8]),"Release keys at boot; then press");
-#endif
-    page_begin(2);
-    for(int i=0;i<9;i++)page_row(i,4+i*25,lines[i],LCD_BLACK,16,1);
+    safety_state_t state;WifiLinkedInfo info={0};char text[96],ip[20]="";
+    safety_state_get(&state);
+    safety_quality_t quality;safety_state_quality(&state,(unsigned int)(LOS_TickCountGet()/1000),&quality);
+    int ap=net_get_mode()==NET_MODE_AP;
+    int linked=GetLinkedInfo(&info)==WIFI_SUCCESS && info.connState==WIFI_CONNECTED && info.ipAddress;
+    if(ap)strcpy(ip,"192.168.2.1");
+    else if(linked){ip4_addr_t a;a.addr=info.ipAddress;ip4addr_ntoa_r(&a,ip,sizeof(ip));}
+    panel_begin(2,"颐鸿安 / 设备状态",SAFETY_FW);
+    snprintf(text,sizeof(text),"模式: %s",ap?"本地热点 / 离线可用":"联网模式 / 云端同步");
+    panel_text(0,4,28,312,20,text,UI_BLUE,UI_BG,16);
+    if(ap)snprintf(text,sizeof(text),"网络: HomeSafety 热点");
+    else if(linked && info.ssid[0])snprintf(text,sizeof(text),"热点: %.32s",info.ssid);
+    else snprintf(text,sizeof(text),"网络: %s",linked?"Wi-Fi已连接":"连接中 / 请检查热点");
+    panel_text(1,8,52,304,22,text,!ap&&!linked?UI_AMBER:UI_INK,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"地址: %s%s",ip[0]?ip:"未获取IP",ip[0]?":8080":"");
+    panel_text(2,8,75,304,22,text,UI_MUTED,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"云端: %s",ap?"本地模式未启用":safety_mqtt_is_connected()?"已连接":"未连接 / 自动重试");
+    panel_text(3,8,98,304,22,text,ap?UI_MUTED:safety_mqtt_is_connected()?UI_BLUE:UI_AMBER,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"温湿度: %s",quality.stale?"采样待更新":!quality.env_available?"异常 / 待重试":state.env_cached?"缓存 / 正在重试":"正常");
+    panel_text(4,8,121,304,22,text,!quality.env_available||state.env_cached?UI_AMBER:UI_INK,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"人体: %s",quality.stale||!state.body_valid?"待确认":state.body?"检测到活动":"暂未检测到活动");
+    panel_text(5,8,144,304,22,text,quality.stale||!state.body_valid?UI_AMBER:UI_INK,LCD_WHITE,16);
+    panel_text(6,8,167,304,22,"供电: 外接电源 / 电量未采集",UI_INK,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"%s",ap?"NFC或浏览器可查看本地页面":"同网访问上方地址 / 自动重连");
+    panel_text(7,4,191,312,20,text,UI_MUTED,UI_BG,16);
+    panel_text(8,4,215,312,22,"K5翻页  长按K5切换网络并重启",UI_BLUE,UI_BG,16);
 }
 
-void ui_show_living(const living_config_t *draft,int field,int result) {
- living_status_t s;living_get(&s);living_config_t c=draft?*draft:s.config;
- char line[80];
- if(page_begin(3))lcd_show_chinese(112,2,(uint8_t*)"生活提醒",LCD_WHITE,LCD_DARKBLUE,24,0);
- snprintf(line,sizeof(line),"%s夜灯 %s",field==0?">":" ",c.night_auto?"自动":"关闭");
- page_row(0,35,line,LCD_BLACK,24,1);
- for(int i=0;i<3;i++) {
-  int minute=living_slot_minute(&c,i),selected=(field>=1&&field<=9&&(field-1)/3==i)||field==10+i;
-  snprintf(line,sizeof(line),"%s%d %02d:%02d %s",selected?">":" ",i+1,minute/60,minute%60,living_slot_enabled(&c,i)?living_medicine_text(s.slot_state[i]):"未开启");
-  page_row(i+1,69+i*28,line,s.slot_state[i]==3?LCD_RED:LCD_DARKBLUE,16,1);
- }
- int pending=living_pending_slot(&s);
- const char *part=field<0?"K6设置":field==0?"夜灯":field>=10?"服药状态":(field-1)%3==0?"开启关闭":(field-1)%3==1?"时":"分";
- if(field<0 && pending>=0)snprintf(line,sizeof(line),"K6确认第%d次 K4消音",pending+1);
- else snprintf(line,sizeof(line),"%s K6选择 K4修改",part);
- page_row(4,158,line,LCD_BLACK,16,1);
- if(result>=100 && result<=102)snprintf(line,sizeof(line),"已确认第%d时段服药",result-99);
- else snprintf(line,sizeof(line),"%s",result==0?"已保存或已确认":result==4?"配置已变更 请重新编辑":result>0?"操作失败 请重试":field<0?"长按K6设置 K5翻页":"长按K6保存 K5取消翻页");
- page_row(5,183,line,LCD_BLACK,16,1);
- page_row(6,208,s.time_synced?"北京时间 已同步":"时间待同步",LCD_BLACK,16,1);
+void ui_show_living(const living_config_t *draft,int field,int result)
+{
+    static int previous_field=-999;
+    living_status_t life;living_get(&life);living_config_t config=draft?*draft:life.config;
+    safety_state_t state;safety_state_get(&state);
+    int pending=living_pending_slot(&life),editing=field>=0;char text[96];
+    panel_begin(3,"颐鸿安 / 生活提醒",editing?"编辑中":"3次/天");
+    // The header marker changes without page re-entry, so cache it separately.
+    panel_text(9,252,0,68,25,editing?"编辑中":"3次/天",LCD_WHITE,UI_BLUE,16);
+    const char *part=field==0?"夜灯模式":field>=10?"服药状态":field>0?(field-1)%3==0?"提醒开关":(field-1)%3==1?"提醒小时":"提醒分钟":"";
+    snprintf(text,sizeof(text),"%s%s",editing?"正在修改: ":"",editing?part:life.time_synced?"北京时间已同步":"时间待同步 / 请先联网");
+    panel_text(0,4,28,312,20,text,editing?UI_BLUE:life.time_synced?UI_MUTED:UI_AMBER,UI_BG,16);
+    snprintf(text,sizeof(text),"%s夜灯 %s / %s",field==0?"> ":"",config.night_auto?"自动":"手动",life.light_owner==3?"报警优先":life.light_owner==2?"提醒优先":life.night_on?"已亮":"已关");
+    panel_text(1,8,52,304,27,text,UI_BLUE,field==0?UI_LINE:LCD_WHITE,16);
+    for(int i=0;i<3;i++) {
+        int minute=living_slot_minute(&config,i),selected=(field>=1&&field<=9&&(field-1)/3==i)||field==10+i;
+        int enabled=living_slot_enabled(&config,i);
+        int old_slot=previous_field>=10?previous_field-10:previous_field>=1?(previous_field-1)/3:-1;
+        if(previous_field!=field && (selected || old_slot==i))s_page_rows[2+i][0]=0;
+        int part_index=field>=1 && field<=9?(field-1)%3:-1;
+        const char *slot_text=!enabled?"未开启":selected&&part_index==0?"已开启":living_medicine_text(life.slot_state[i]);
+        snprintf(text,sizeof(text),"%s第%d次   %02d:%02d   %s",selected?"> ":"  ",i+1,minute/60,minute%60,slot_text);
+        uint16_t fg=enabled&&life.slot_state[i]==3?UI_RED:enabled?UI_INK:UI_MUTED;
+        if(panel_text(2+i,8,84+i*35,304,30,text,fg,selected?UI_LINE:LCD_WHITE,16) && selected) {
+            int x0=part_index==1?92:part_index==2?116:156;
+            int x1=part_index==1?108:part_index==2?132:204;
+            lcd_draw_line(x0,108+i*35,x1,108+i*35,UI_BLUE);
+        }
+    }
+    const char *feedback=result==0?"已保存或已确认":result==4?"配置已变更 / 请重新编辑":result>0?"操作失败 / 请重试":editing?(field>=10?"K4立即更改当天服药状态":"修改未保存 / K5取消"):
+        state.alarm?"请先核实当前报警":pending>=0?"到时未服药 / 请核实后确认":"按计划提醒 / 可自主开启";
+    if(result>=100 && result<=102)snprintf(text,sizeof(text),"已确认第%d次服药",result-99);
+    else snprintf(text,sizeof(text),"%s",feedback);
+    panel_text(5,4,191,312,20,text,result>0&&result<100?UI_AMBER:pending>=0&&!editing?UI_RED:UI_MUTED,UI_BG,16);
+    const char *hint=state.alarm?"K6确认报警 K4消音 K5翻页":editing?(field>=10?"K4改状态 K6下一项 K5退出":"K4改 K6选 长按K6保存 K5取消"):
+        pending>=0?"K6确认服药 K4消音 K5翻页":"K6设置 K5翻页";
+    panel_text(6,4,215,312,22,hint,UI_BLUE,UI_BG,16);
+    previous_field=field;
 }
 
 /* Only this worker draws after ui_init. The safety monitor never waits for
@@ -423,21 +479,27 @@ static
 #endif
 void ui_render_pending(void)
 {
-    static unsigned drawn_serial,drawn_events;
+    static unsigned drawn_serial;
     static int drawn_page=-1;
     ui_frame_t f;
     safety_lock();f=s_requested;safety_unlock();
-    if(!f.serial || f.serial==drawn_serial)return;
+    if(!f.serial)return;
+    if(f.serial==drawn_serial) {
+        if(f.page==0)metric_animate();
+        return;
+    }
     int entering=drawn_page!=f.page;
     if(f.page==0) {
         if(entering)ui_show_main();
         ui_update_snapshot(f.state.temp,f.state.humi,f.state.body,f.state.gas,f.state.light,
                   f.state.smoke,f.state.fall,f.state.help,f.state.door,f.state.alarm,f.status,&f.state,&f.life);
     } else if(f.page<3) {
-        if(entering || drawn_events!=f.event_revision)ui_show_events(f.page-1);
+        ui_show_events(f.page-1);
     } else if(f.page==3)ui_show_diagnostics();
     else ui_show_living(f.has_draft?&f.draft:NULL,f.field,f.result);
-    drawn_page=f.page;drawn_serial=f.serial;drawn_events=f.event_revision;
+    if(f.page==0)metric_animate();
+    else memset(s_metric,0,sizeof(s_metric));
+    drawn_page=f.page;drawn_serial=f.serial;
 }
 static void ui_task(void *arg)
 {
@@ -471,7 +533,7 @@ static void ui_task(void *arg)
         LOS_Msleep(50);
     }
 #else
-    while(1){ui_render_pending();LOS_Msleep(100);}
+    while(1){ui_render_pending();LOS_Msleep(metric_active()?40:100);}
 #endif
 }
 int ui_start(void)

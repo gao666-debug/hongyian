@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import hashlib
 import hmac
 import json
@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field, ConfigDict, ValidationError, StrictBool, 
 
 from .settings import Settings
 from .store import Store, digest
+from .reports import build_report
+from . import door as door_model
 from .cloud import HuaweiCloud, CloudError
 from . import watch as watch_model
-from .medicine import LivingConfig, MedicinePlan, MedicineConfirmation, MedicineChange, LivingStatus, mock_living_command
+from .medicine import LightControl, LivingConfig, MedicinePlan, MedicineConfirmation, MedicineChange, LivingStatus, mock_living_command
 
 
 def utc():
@@ -37,13 +39,19 @@ class Login(StrictModel):
 class Command(StrictModel):
     device_id: str
     service_id: Literal['HomeSafety'] = 'HomeSafety'
-    command_name: Literal['ack','mute','set_living','confirm_medicine','set_medicine_plan','set_medicine_state']
+    command_name: Literal['ack','mute','set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light']
     paras: dict = Field(default_factory=dict)
     client_request_id: str = Field(min_length=1,max_length=128)
 
 class Note(StrictModel):
     note: str = Field(min_length=1,max_length=2000)
     resolution: Literal['handled','false_alarm','follow_up']
+
+class AppSOS(StrictModel):
+    client_request_id: str = Field(min_length=1,max_length=128)
+
+class BatchNotes(Note):
+    event_keys: list[str] = Field(min_length=1,max_length=100)
 
 class DeviceMessage(StrictModel):
     name: Literal['alarm_event','device_health','activity_stats']
@@ -186,7 +194,7 @@ def create_app(settings=None, cloud=None):
                     'env_valid':1,'imu_valid':0,'door_enabled':0,'wireless_btn_enabled':0,'mute':0,'tls':False}
                 if name in ('ack','mute'): health['mute']=1
                 result=0
-                if name in ('set_living','confirm_medicine','set_medicine_plan','set_medicine_state'):
+                if name in ('set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light'):
                     params=json.loads(row['body'])['paras']
                     life,result=mock_living_command(health.get('living'),name,params,int(time.time()),props.get('light',100),props.get('alarm',0))
                     health['living']=life
@@ -215,7 +223,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.5.1',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.8.1',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -235,7 +243,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.5.1','camera_transport':'jpeg-relay'})
+                         'api_version':'1.8.1','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
     from .camera import CameraService
@@ -432,6 +440,7 @@ def create_app(settings=None, cloud=None):
         if body.command_name in ('ack','mute') and body.paras:
             raise HTTPException(422,'ack/mute require paras:{}')
         try:
+            if body.command_name == 'set_light': LightControl.model_validate(body.paras)
             if body.command_name == 'set_living': LivingConfig.model_validate(body.paras)
             if body.command_name == 'confirm_medicine': MedicineConfirmation.model_validate(body.paras)
             if body.command_name == 'set_medicine_plan': MedicinePlan.model_validate(body.paras)
@@ -518,6 +527,7 @@ def create_app(settings=None, cloud=None):
             elif key=='door':
                 if value not in ('OPEN','CLOSED'): raise HTTPException(422,'Invalid door value')
                 props[key]=value
+        door_model.observe(store,settings.mode,device,props,time.time())
         old=store.doc(settings.mode,device,'shadow') or {'properties':{}}
         old['properties'].update(props)
         old.update(device_id=device,service_id=service.get('service_id',''),updated_at=utc(),online=True)
@@ -554,13 +564,31 @@ def create_app(settings=None, cloud=None):
         # fall_count 只增不减，差值就是这一条上报里新增的摔倒判定
         known = previous.get('fall_count') or 0
         events = []
-        for index in range(known+1,report['fall_count']+1):
-            event = {'kind':'watch_fall','fall_count':index,'detected_at':report['received_at'],
+        delta=max(0,report['fall_count']-known)
+        if delta:
+            sequence=store.doc(settings.mode,target,'watch_history_sequence') or {'value':0}
+            sequence['value']+=1
+            store.put(settings.mode,target,'watch_history_sequence',sequence)
+            event = {'kind':'watch_fall','fall_count':report['fall_count'],'new_count':delta,
+                     'detected_at':report['received_at'],'time_basis':'received_at',
                      'heart_rate':report['heart_rate'],'spo2':report['spo2'],
                      'motion_mg':report['motion_mg'],'steps':report['steps']}
-            store.put(settings.mode,target,'watch_fall',event,str(index))
+            # A disconnected counter jump is one observed batch, not thousands
+            # of incidents with invented individual timestamps. Reboots cannot overwrite it.
+            store.put(settings.mode,target,'watch_fall',event,'batch:'+str(sequence['value']))
             events.append(event)
+        wearable_alarm = None
+        if (report['fall_active'] and not previous.get('fall_active')) or (bool(previous) and bool(events)):
+            # New incidents use a persisted sequence; a rebooted counter cannot collide.
+            seq = store.doc(settings.mode,target,'watch_alarm_sequence') or {'value':0}
+            seq['value'] += 1
+            store.put(settings.mode,target,'watch_alarm_sequence',seq)
+            wearable_alarm = {'boot_id':2147483647,'event_id':seq['value'],'code':2,
+                              'phase':'start','epoch':int(time.time()),'up':0,'duration':0,
+                              'value':report['motion_mg'],'source':'wearable','source_device_id':source_device}
+            store.put(settings.mode,target,'alarm',wearable_alarm,f"2147483647:{seq['value']}")
         await publish(target,'watch',report)
+        if wearable_alarm: await publish(target,'alarm',wearable_alarm)
         for event in events:
             await publish(target,'watch_fall',event)
         return envelope({'accepted':True,'fall_events':len(events),'hour':hour['hour'],'device':target})
@@ -661,18 +689,73 @@ def create_app(settings=None, cloud=None):
             raise HTTPException(422,'Expected IoTDA device.message/report notification')
         return await ingest(device,message)
 
+    @app.post('/api/v1/devices/{device}/sos',status_code=201)
+    async def app_sos(device,body: AppSOS,user=Depends(session)):
+        check_device(device,user,control=True)
+        # Stable across retries and isolated from physical boot/event identifiers.
+        event_id=int(hashlib.sha256((user['username']+':'+body.client_request_id).encode()).hexdigest()[:12],16)
+        key=f"2147483647:{event_id}"
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT body FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',
+                           (settings.mode,device,'alarm',key)).fetchone()
+            created=row is None
+            data=json.loads(row['body']) if row else {'boot_id':2147483647,'event_id':event_id,'code':1,
+                'phase':'start','epoch':int(time.time()),'up':0,'duration':0,'value':0,
+                'source':'app','requested_by':user['username']}
+            if created: store.put(settings.mode,device,'alarm',data,key,db)
+        if created: await publish(device,'alarm',data)
+        return envelope(data)
+
+    @app.post('/api/v1/devices/{device}/alarms/batch-notes')
+    async def batch_notes(device,body: BatchNotes,user=Depends(session)):
+        check_device(device,user,control=True)
+        keys=list(dict.fromkeys(body.event_keys))
+        changed=[]
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            # Validate entire snapshot before writing any notes.
+            for key in keys:
+                if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',
+                                  (settings.mode,device,'alarm',key)).fetchone():
+                    raise HTTPException(404,'Alarm not found')
+            for key in keys:
+                prior=db.execute('SELECT resolution FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id DESC LIMIT 1',
+                                 (settings.mode,device,key)).fetchone()
+                if prior and prior['resolution']!='follow_up': continue
+                db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
+                           (settings.mode,device,key,user['username'],body.note,body.resolution,time.time()))
+                changed.append(key)
+        for key in changed: await publish(device,'alarm_note',{'event_key':key,'resolution':body.resolution})
+        return envelope({'handled_keys':changed,'requested_count':len(keys)})
+
+    @app.get('/api/v1/devices/{device}/door-records')
+    def door_records(device,limit: int=Query(default=30,ge=1,le=100),user=Depends(session)):
+        check_device(device,user)
+        state=store.doc(settings.mode,device,'door_context') or {}
+        return envelope({'summary':door_model.summarize(state,time.time()),
+                         'items':store.list_docs(settings.mode,device,'door_record',limit)})
+
     @app.get('/api/v1/devices/{device}/alarms')
     def alarms(device,limit: int=Query(default=50,ge=1,le=100),offset: int=Query(default=0,ge=0),user=Depends(session)):
         check_device(device,user)
-        return envelope({'items':store.list_docs(settings.mode,device,'alarm',limit,offset),'limit':limit,'offset':offset})
+        items=store.list_docs(settings.mode,device,'alarm',limit,offset)
+        with store.connection() as db:
+            for item in items:
+                key=f"{item['boot_id']}:{item['event_id']}"
+                note=db.execute('SELECT resolution,username,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id DESC LIMIT 1',
+                                (settings.mode,device,key)).fetchone()
+                if note: item['handling']=dict(note)
+        return envelope({'items':items,'limit':limit,'offset':offset})
 
     @app.post('/api/v1/devices/{device}/alarms/{event_key}/notes',status_code=201)
-    def add_note(device,event_key,body: Note,user=Depends(session)):
+    async def add_note(device,event_key,body: Note,user=Depends(session)):
         check_device(device,user,control=True)
         if not store.doc(settings.mode,device,'alarm',event_key): raise HTTPException(404,'Alarm not found')
         with store.connection() as db:
             cur=db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
                            (settings.mode,device,event_key,user['username'],body.note,body.resolution,time.time()))
+        await publish(device,'alarm_note',{'event_key':event_key,'resolution':body.resolution})
         return envelope({'note_id':cur.lastrowid,'event_key':event_key,'username':user['username']})
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
@@ -682,6 +765,12 @@ def create_app(settings=None, cloud=None):
             rows=db.execute('SELECT id,username,note,resolution,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id',
                             (settings.mode,device,event_key)).fetchall()
         return envelope({'items':[dict(r) for r in rows]})
+
+    @app.get('/api/v1/devices/{device}/reports')
+    def reports(device,user=Depends(session)):
+        check_device(device,user)
+        today=datetime.now(timezone(timedelta(hours=8))).date()
+        return envelope(build_report(store.list_docs(settings.mode,device,'day',1000),today))
 
     @app.get('/api/v1/devices/{device}/stats')
     def stats(device,from_date: date | None=None,to_date: date | None=None,user=Depends(session)):

@@ -14,7 +14,7 @@
 #define VENDOR_ID_WIFI_MODE 6
 #define VENDOR_ID_WIFI_ROUTE_SSID 7
 #define VENDOR_ID_WIFI_ROUTE_PASSWD 8
-typedef struct {int connState,rssi,frequency;unsigned int ipAddress;} WifiLinkedInfo;
+typedef struct {int connState,rssi,frequency;unsigned int ipAddress;char ssid[33];} WifiLinkedInfo;
 int GetLinkedInfo(WifiLinkedInfo*);int IsHotspotActive(void);int IsWifiActive(void);
 int SetWifiModeOff(void);int SetApModeOn(void);int SetWifiModeOn(void);int WifiDisconnect(int);int WifiConnect(unsigned char*,unsigned char*);
 void FlashInit(void);int VendorSet(int,unsigned char*,unsigned int);

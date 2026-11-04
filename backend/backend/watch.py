@@ -30,7 +30,7 @@ ACCEL_KEYS = ('accel_x', 'accel_y', 'accel_z')
 # 单值合法区间。加速度按 +=16g 给余量（固件是 ±8g 量程，摔击瞬间会顶到边界）。
 LIMITS = {'heart_rate': (0, 250), 'spo2': (0, 100),
           'accel_x': (-16000, 16000), 'accel_y': (-16000, 16000), 'accel_z': (-16000, 16000),
-          'steps': (0, 5000000), 'fall_state': (0, 2), 'fall_count': (0, 1000000)}
+          'steps': (0, 5000000), 'fall_state': (0, 2), 'fall_count': (0, 1000000), 'battery_percent': (0, 100)}
 
 # 手持时 z 轴朝上约 +1000mg；平放桌面时按安装方向落在另一个轴上。
 # 这里只做"大致姿态"判断，不用于跌倒结论。
@@ -119,6 +119,7 @@ def normalize(properties, service_id='', received_at=None):
     report['hr_measuring'] = (report['heart_rate'] or 0) > 0
     report['fall_active'] = report['fall_state'] == 2
     report['fall_watch'] = report['fall_state'] == 1
+    report['battery_percent'] = _number('battery_percent', properties['battery_percent']) if 'battery_percent' in properties else None
     if extra:
         report['ignored_properties'] = sorted(extra)
     return report

@@ -366,7 +366,7 @@ int safety_command_submit(int code, const char *source, unsigned int *id)
 int safety_command_submit_payload(int code, const char *source, const char *payload, unsigned int *id)
 {
     safety_command_t *c;
-    if (code < SAFETY_CMD_ACK || code > SAFETY_CMD_MEDICINE_STATE || !payload || strlen(payload) >= 384)
+    if (code < SAFETY_CMD_ACK || code > SAFETY_CMD_LIGHT || !payload || strlen(payload) >= 384)
         return -1;
     safety_lock();
     if (s_count == 8)

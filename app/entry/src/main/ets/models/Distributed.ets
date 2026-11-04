@@ -5,6 +5,7 @@ export interface EnvironmentProperties {
 export interface EnvironmentShadow { properties?: EnvironmentProperties; updated_at?: string | null; online?: boolean | null; }
 export interface EnvironmentHealth extends EnvironmentProperties { epoch?: number; up?: number; fw?: string; }
 export interface WearReading {
+  battery_percent?: number | null;
   heart_rate?: number | null; spo2?: number | null; steps?: number | null;
   received_at?: string; fall_state?: number; fall_count?: number; posture?: string;
   fall_active?: boolean; hr_measuring?: boolean; motion_mg?: number; dynamic_mg?: number;

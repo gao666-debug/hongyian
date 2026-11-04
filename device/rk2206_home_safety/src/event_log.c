@@ -169,8 +169,10 @@ int event_log_get(int idx, char *out, int n)
 }
 const char *event_log_tag_cn(const char *tag)
 {
+    if(!tag)return "";
     if(!strcmp(tag,"MED_DUE"))return "服药提醒";
     if(!strcmp(tag,"MED_TAKEN"))return "服药确认";
+    if(tag && !strcmp(tag,"MED_UNTAKEN"))return "改未服药";
     if (tag == NULL)
     {
         return "";
@@ -185,7 +187,7 @@ const char *event_log_tag_cn(const char *tag)
     }
     if (strcmp(tag, "GAS") == 0)
     {
-        return "燃气泄漏";
+        return "烟气异常";
     }
     if (strcmp(tag, "FALL") == 0)
     {

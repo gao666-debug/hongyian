@@ -102,3 +102,20 @@ const tomorrow=demoLivingUpdate(second,'set_medicine_plan',{night_auto:true,medi
 assert.equal(JSON.stringify(tomorrow.slots.map(s=>s.state)),JSON.stringify([3,3,0]));
 assert.equal(second.slots[1].state,4); // Helpers must not mutate received device state.
 console.log('PASS three-dose slots, legacy display, independence, undo, midnight and immutable updates');
+
+const wearable={...alarm,boot_id:2147483647,source:'wearable'};
+assert(alarmIsActive(wearable,[wearable],{...snap,status:0,bootId:999},['2147483647:1']));
+assert(!alarmIsActive({...wearable,handling:{resolution:'handled'}},[wearable],snap,[]));
+assert(alarmIsActive({...wearable,handling:{resolution:'follow_up'}},[wearable],snap,[]));
+console.log('PASS wearable incidents remain independent of mainboard recovery and ACK; handling closes them');
+const appSOS={...event(2147483647,991),source:'app'};
+const unknownSnapshot={fresh:true,reportTime:999999999,status:0,bootId:1,healthUp:100};
+assert(alarmIsActive(appSOS,[appSOS],unknownSnapshot,[]),'app SOS must survive healthy gateway snapshot');
+const handledSOS={...appSOS,handling:{resolution:'handled'}};
+assert(!alarmIsActive(handledSOS,[handledSOS],unknownSnapshot,[]),'saved SOS handling closes pending status');
+const manualLamp={schema:2,config_revision:1,night_auto:false,night_on:true,light_valid:false,light_owner:'night',light_mode:1};
+assert.equal(nightLabel(manualLamp,true),'手动 · 已亮灯');
+assert.equal(nightLabel({...manualLamp,night_on:false,light_mode:0},true),'手动 · 已关闭');
+assert.equal(nightLabel({...manualLamp,light_owner:'alarm'},true),'报警灯优先');
+assert.equal(nightLabel(manualLamp,false),'状态待更新');
+console.log('PASS manual night-light labels, priority and stale reading');
