@@ -64,9 +64,8 @@ class Settings:
     def device_ids(self) -> list[str]:
         """App 可见的设备列表（DEVICE_ID 逗号分隔）。
 
-        注意：手表**不在**这里。手表是「人」身上的穿戴设备，它的数据挂靠在
-        主设备下（见 primary_device 与 /devices/{主板}/watch），
-        App 不需要把一块表当成第三台独立设备来展示。
+        登录实际以家庭绑定清单为准；手表作为 wearable 独立登记。
+        归一化手表数据仍通过主设备 /watch 读取。
         """
         raw = (self.device_id or '').strip()
         ids = [d.strip() for d in raw.split(',') if d.strip()]

@@ -1,0 +1,15 @@
+# Merge these settings into the EXISTING API service; do not start two API copies.
+[Unit]
+Description=YiHongAn API and camera latest-frame relay
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/deploy/app
+EnvironmentFile=/home/deploy/app/.env
+ExecStart=/home/deploy/app/.venv/bin/python /home/deploy/app/run.py --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

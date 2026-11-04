@@ -14,8 +14,24 @@ export interface WearHour { hour: string; hr?: WearAggregate; spo2?: WearAggrega
 export interface WearFall { key?: string; fall_count: number; detected_at: string; heart_rate?: number; spo2?: number; }
 export interface WearHours { items: WearHour[]; }
 export interface WearFalls { items: WearFall[]; }
-export interface DistributedNode { device_id: string; kind: string; name: string; room: string; }
-export interface DistributedFamily { devices: DistributedNode[]; }
+export interface DistributedNode {
+  device_id: string; kind: string; name: string; room: string;
+  properties?: EnvironmentProperties | null; watch?: WearReading | null;
+  updated_at?: string | null; online?: boolean | null;
+}
+export interface DistributedFamily { devices: DistributedNode[]; name?: string; role?: string; }
+
+export function gatewayId(nodes: DistributedNode[]): string {
+  const gateways = nodes.filter((node: DistributedNode) => node.kind === 'gateway');
+  return gateways.length === 1 ? gateways[0].device_id : '';
+}
+export function environmentNodes(nodes: DistributedNode[]): DistributedNode[] {
+  return nodes.filter((node: DistributedNode) => node.kind === 'nearlink' || node.kind === 'environment');
+}
+export function heartText(reading: WearReading | null | undefined): string {
+  if (!reading) { return '待上报'; }
+  return reading.hr_measuring === false ? '未测到' : watchVital(reading.heart_rate, '', 240);
+}
 
 export function validNumber(value: number | null | undefined, min: number = 0, max: number = 10000000): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
