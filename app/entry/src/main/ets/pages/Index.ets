@@ -885,7 +885,7 @@ struct Index {
               Text((readingFresh(node.watch.received_at,this.now)?'近期上报 · ':'数据待更新 · ')+(node.watch.received_at || '时间待确认')).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
             } else if (node.kind==='wearable') { Text('等待手表上报，不显示模拟健康值').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
           }.padding({top:14,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line}).width('100%')
-        }, (node: DistributedNode) => node.device_id)
+        }, (node: DistributedNode) => node.device_id + JSON.stringify(node))
         if (!this.familyNodes.length) { Text('可从上方入口查看已授权节点的数据').fontSize(this.readableSize(13)).fontColor(SUB).padding({top:12,bottom:12}) }
         Button('查看摄像头实时画面 ›').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{router.pushUrl({url:'pages/Camera'});})
       }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(16).width('100%').margin({bottom:18})
