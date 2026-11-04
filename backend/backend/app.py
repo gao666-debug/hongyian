@@ -215,7 +215,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.4.1',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.5.0',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -234,9 +234,14 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/healthz')
     def healthz():
-        return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws'})
+        return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
+                         'api_version':'1.5.0','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
+    from .camera import CameraService
+    cameras = CameraService(store, settings, homes)
+    cameras.install(app, session, envelope)
+    app.state.cameras = cameras
 
     @app.post('/api/v1/auth/login')
     def login(body: Login,request: Request):
@@ -249,7 +254,8 @@ def create_app(settings=None, cloud=None):
         token = store.login(body.username,body.password,settings.token_seconds)
         if not token: raise HTTPException(401,'Invalid username or password')
         return envelope({'access_token':token,'token_type':'Bearer','expires_in':settings.token_seconds,
-                         'username':body.username,'device_ids':homes.device_ids(body.username)})
+                         'username':body.username,'device_ids':homes.device_ids(body.username),
+                         'devices':homes.describe(body.username)})
 
     @app.post('/api/v1/auth/logout')
     def logout(user=Depends(session)):
@@ -283,6 +289,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/api/v1/devices/{device}/watch')
     def watch_latest(device,user=Depends(session)):
         check_device(device,user)
+        check_device(settings.primary_device,user)
         data = store.doc(settings.mode,settings.primary_device,'watch')
         if data is None: raise HTTPException(404,'No watch report yet')
         return envelope(data)
@@ -290,6 +297,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/api/v1/devices/{device}/watch/hours')
     def watch_hours(device,limit: int=Query(default=24,ge=1,le=720),user=Depends(session)):
         check_device(device,user)
+        check_device(settings.primary_device,user)
         items = store.list_docs(settings.mode,settings.primary_device,'watch_hour',limit)
         for item in items:
             for name in ('hr','spo2'):
@@ -300,6 +308,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/api/v1/devices/{device}/watch/falls')
     def watch_falls(device,limit: int=Query(default=50,ge=1,le=200),user=Depends(session)):
         check_device(device,user)
+        check_device(settings.primary_device,user)
         return envelope({'items':store.list_docs(settings.mode,settings.primary_device,'watch_fall',limit)})
     # ===== 手表接口结束 =====
 

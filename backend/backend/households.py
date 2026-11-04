@@ -18,10 +18,17 @@ class Households:
             db.execute('INSERT OR IGNORE INTO home_members VALUES(?,?,?)',('default',settings.username,'owner'))
             for device,kind,name,room in [
                 (settings.primary_device,'gateway','居家守护主机','客厅'),
-                *((device,'nearlink','星闪环境节点','房间待设置') for device in settings.device_ids[1:]),
+                *((device,'nearlink','星闪环境节点','房间待设置') for device in settings.device_ids[1:] if device != settings.watch_device_id),
                 (settings.nearlink_device_id,'nearlink','星闪 A','房间待设置'),
                 (settings.watch_device_id,'wearable','星闪 B · 健康手表','随身')]:
                 if device: db.execute('INSERT OR IGNORE INTO home_devices VALUES(?,?,?,?,?)',(device,'default',kind,name,room))
+            # Repair the previous broad environment registration without moving household ownership.
+            if settings.watch_device_id:
+                db.execute("UPDATE home_devices SET kind='wearable' WHERE device=?",(settings.watch_device_id,))
+
+    def describe(self,username):
+        with self.store.connection() as db:
+            return [dict(r) for r in db.execute('SELECT d.device AS device_id,d.kind,d.name,d.room FROM home_devices d JOIN home_members m ON m.home=d.home WHERE m.username=?',(username,)) if r['device_id'] in self.configured_ids()]
 
     def configured_ids(self):
         return set(self.settings.allowed_device_ids)
@@ -49,7 +56,8 @@ class Households:
                 shadow=self.store.doc(self.settings.mode,node['device_id'],'shadow') or {}
                 node['properties']=shadow.get('properties')
                 node['updated_at']=shadow.get('updated_at')
-                node['watch']=self.store.doc(self.settings.mode,self.settings.primary_device,'watch') if node['kind']=='wearable' else None
+                node['online']=shadow.get('online')
+                node['watch']=self.store.doc(self.settings.mode,self.settings.primary_device,'watch') if node['kind']=='wearable' and self.settings.primary_device in [n['device_id'] for n in nodes] else None
             return envelope({'name':'颐鸿安 · 我的家庭','role':member['role'],'devices':nodes,'members':members})
 
         @app.post('/api/v1/household/members',status_code=201)

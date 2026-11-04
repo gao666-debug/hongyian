@@ -1,0 +1,5 @@
+HomeSafetyCamera/secrets.h
+HomeSafetyCamera/cloud_private.h
+build/
+logs/
+*.bin

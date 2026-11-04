@@ -1,5 +1,6 @@
+import { DistributedNode } from './Distributed';
 export interface Envelope { code: number; message: string; data?: object; mode?: string; simulated?: boolean; }
-export interface LoginData { access_token: string; device_ids?: string[]; }
+export interface LoginData { access_token: string; device_ids?: string[]; devices?: DistributedNode[]; }
 export interface Properties {
   temp?: number; humi?: number; gas?: number; light?: number; body?: number; inactive?: number;
   alarm?: number; status?: number; help?: number; fall?: number; gas_alarm?: number; smoke?: number; door?: number;

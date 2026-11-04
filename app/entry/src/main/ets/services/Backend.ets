@@ -2,15 +2,16 @@ import { http, webSocket } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { Envelope, LoginData, Push, Ticket } from '../models/Models';
+import { DistributedFamily, DistributedNode, gatewayId } from '../models/Distributed';
 
 export class Backend {
   base: string = '';
   device: string = 'demo-device';
   token: string = '';
   deviceIds: string[] = [];
+  family: DistributedFamily = { devices: [] };
   caPath: string = '';
   private publicCaPath: string = '';
-  private readonly publicBase: string = 'https://backend.example.com';
   private socket: webSocket.WebSocket | null = null;
   private timer: number = -1;
   private generation: number = 0;
@@ -30,15 +31,50 @@ export class Backend {
   async prepare(context: common.UIAbilityContext): Promise<void> {
     this.caPath = await this.installCertificate(context, 'development-ca.crt');
     this.publicCaPath = await this.installCertificate(context, 'qbot-public.crt');
+    // Trust both configured certificates independently of the editable server address.
+    // This also keeps sanitized public source usable without a hardcoded production IP.
+    try {
+      const dev=await context.resourceManager.getRawFileContent('development-ca.crt');
+      const remote=await context.resourceManager.getRawFileContent('qbot-public.crt');
+      const bundle=new Uint8Array(dev.length+remote.length+1);
+      bundle.set(dev,0);bundle[dev.length]=10;bundle.set(remote,dev.length+1);
+      const path=context.cacheDir+'/backend-trust.crt';
+      const file=fs.openSync(path,fs.OpenMode.CREATE|fs.OpenMode.READ_WRITE|fs.OpenMode.TRUNC);
+      try{fs.writeSync(file.fd,bundle.buffer);}finally{fs.closeSync(file);}
+      this.caPath=path;
+    }catch(error){if(this.publicCaPath){this.caPath=this.publicCaPath;}}
   }
-  private certificatePath(): string {
-    if (this.base === this.publicBase) {
-      if (this.publicCaPath === '') { throw new Error('服务器信任证书加载失败，请重新启动 App'); }
-      return this.publicCaPath;
-    }
+  certificatePath(): string {
     return this.caPath;
   }
   path(suffix: string): string { return `/api/v1/devices/${encodeURIComponent(this.device)}/${suffix}`; }
+  applyFamily(family: DistributedFamily): void {
+    this.family = family;
+    const nodes = (family.devices || []).filter((node: DistributedNode) => this.deviceIds.includes(node.device_id));
+    const gateway = gatewayId(nodes);
+    if (!gateway) { throw new Error('家庭未配置唯一守护主机，请联系管理员'); }
+    this.device = gateway;
+  }
+  async refreshHousehold(): Promise<DistributedFamily> {
+    const token = this.token;
+    const response = await this.request('/api/v1/household');
+    if (!token || token !== this.token) { throw new Error('账号已切换'); }
+    const family = response.data as DistributedFamily;
+    this.deviceIds = (family.devices || []).map((node: DistributedNode) => node.device_id);
+    this.applyFamily(family);
+    return family;
+  }
+  async binary(path: string): Promise<ArrayBuffer> {
+    const client = http.createHttp();
+    const options: http.HttpRequestOptions = {header:{Authorization:'Bearer '+this.token},
+      expectDataType:http.HttpDataType.ARRAY_BUFFER,usingCache:false,connectTimeout:8000,readTimeout:10000};
+    const cert=this.certificatePath(); if(cert){options.caPath=cert;}
+    try {
+      const response=await client.request(this.base+path,options);
+      if(response.responseCode!==200){throw new Error(response.responseCode===401?'登录已过期':'摄像头未上线');}
+      return response.result as ArrayBuffer;
+    } finally {client.destroy();}
+  }
   async request(path: string, method: http.RequestMethod = http.RequestMethod.GET, body: string = ''): Promise<Envelope> {
     const certificate = this.certificatePath();
     const client = http.createHttp();
@@ -64,18 +100,21 @@ export class Backend {
   async login(base: string, username: string, password: string): Promise<void> {
     const clean = base.trim().replace(/\/+$/, '');
     if (!clean.startsWith('https://')) { throw new Error('后端地址需要使用 HTTPS'); }
-    this.stopPush(); this.base = clean; this.token = ''; this.deviceIds = [];
+    this.stopPush(); this.base = clean; this.token = ''; this.deviceIds = []; this.family={devices:[]};
     const response = await this.request('/api/v1/auth/login', http.RequestMethod.POST, JSON.stringify({ username: username, password: password }));
     const login = response.data as LoginData;
     this.token = login.access_token;
     if (!this.token) { throw new Error('登录响应缺少令牌'); }
     this.deviceIds = login.device_ids || [];
-    if (this.deviceIds.length && !this.deviceIds.includes(this.device)) { this.device = this.deviceIds[0]; }
+    try {
+      if (login.devices && login.devices.length) { this.applyFamily({devices:login.devices}); }
+      else { await this.refreshHousehold(); }
+    } catch (error) { this.token='';this.deviceIds=[];this.family={devices:[]};throw new Error((error as Error).message || '无法识别家庭主机'); }
   }
   async logout(): Promise<void> {
     this.stopPush();
     try { if (this.token) { await this.request('/api/v1/auth/logout', http.RequestMethod.POST, '{}'); } }
-    finally { this.token = ''; this.deviceIds = []; }
+    finally { this.token = ''; this.deviceIds = []; this.family={devices:[]}; }
   }
   stopPush(): void {
     this.generation++;

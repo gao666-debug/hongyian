@@ -28,19 +28,23 @@ assert.equal(m.reportAge(null,now),'采集时间待确认');
 assert.match(m.hourLabel('2026-11-02T08'),/^\d{2}时$/);
 
 // Login must honor the server's authorized device list rather than a hardcoded identity.
-let payload = {code:0,data:{access_token:'test-token',device_ids:['test-main','test-room']}};
+let payload = {code:0,data:{access_token:'test-token',device_ids:['test-watch','test-room','test-main'],devices:[{device_id:'test-watch',kind:'wearable'},{device_id:'test-room',kind:'nearlink'},{device_id:'test-main',kind:'gateway'}]}};
 const network = {http:{RequestMethod:{GET:0,POST:1},HttpDataType:{STRING:0},createHttp:()=>({
   request:async()=>({responseCode:200,result:JSON.stringify(payload)}),destroy:()=>{}})}};
-const {Backend} = load('services/Backend.ets',name=>name==='@kit.NetworkKit'?network:{});
+const {Backend} = load('services/Backend.ets',name=>name==='@kit.NetworkKit'?network:name==='../models/Distributed'?m:{});
 (async()=>{
   const api = new Backend();
   await api.login('https://example.test/','test-user','test-password');
   assert.equal(api.device,'test-main');
-  assert.equal(Array.from(api.deviceIds).join(','),'test-main,test-room');
+  assert.equal(Array.from(api.deviceIds).join(','),'test-watch,test-room,test-main');
   assert.equal(api.path('watch'),'/api/v1/devices/test-main/watch');
   await api.logout();assert.equal(api.deviceIds.length,0);assert.equal(api.token,'');
-  payload={code:0,data:{access_token:'test-token',device_ids:['other-main']}};
+  payload={code:0,data:{access_token:'test-token',device_ids:['other-main'],devices:[{device_id:'other-main',kind:'gateway'}]}};
   await api.login('https://example.test','another-user','test-password');
   assert.equal(api.device,'other-main');
+  assert.equal(m.gatewayId([{device_id:'watch',kind:'wearable'},{device_id:'main',kind:'gateway'}]),'main');
+  assert.equal(m.gatewayId([{device_id:'watch',kind:'wearable'}]),'');
+  assert.equal(m.environmentNodes([{device_id:'watch',kind:'wearable'},{device_id:'env',kind:'nearlink'}]).length,1);
+  assert.equal(m.heartText({heart_rate:75,hr_measuring:false}),'未测到');
   console.log('PASS distributed: missing vs zero, sensor units, door types, vitals, stale/future data, UTC buckets, authorized device selection and logout');
 })().catch(error=>{console.error(error);process.exitCode=1;});

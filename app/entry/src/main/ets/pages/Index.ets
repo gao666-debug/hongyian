@@ -5,7 +5,7 @@ import { router } from '@kit.ArkUI';
 import { promptAction } from '@kit.ArkUI';
 import { CareTheme } from '../theme/CareTheme';
 import { Backend } from '../services/Backend';
-import { watchVital } from '../models/Distributed';
+import { watchVital, heartText, DistributedNode, DistributedFamily, readingFresh, sensorText, motionText, roomDoorText } from '../models/Distributed';
 import { DeviceSession } from '../services/DeviceSession';
 import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate } from '../models/Living';
 import { AlarmSnapshot, alarmStateLabel, alarmIsActive, noteText, resolutionLabel } from '../models/AlarmState';
@@ -28,15 +28,10 @@ interface SectionView { title: string; subtitle: string; }
 interface SummaryView { label: string; value: string; }
 interface InfoView { label: string; value: string; color: string; }
 
-interface FamilyNode { device_id: string; kind: string; name: string; room: string; watch: WatchReading | null; properties: NodeProperties | null; updated_at: string | null; }
-interface NodeProperties { light?: number; smoke?: number; body?: number; door?: string; temp?: number; humi?: number; }
-interface WatchReading { heart_rate: number | null; spo2: number | null; steps: number; received_at: string; }
-interface FamilyData { name: string; role: string; devices: FamilyNode[]; }
-
 @Entry
 @Component
 struct Index {
-  @State familyNodes: FamilyNode[] = [];
+  @State familyNodes: DistributedNode[] = [];
   @State familyRole: string = '';
   @State memberName: string = '';
   @State memberPassword: string = '';
@@ -57,11 +52,10 @@ struct Index {
   private async refreshFamily(): Promise<void> {
     const generation = this.generation;
     try {
-      const response = await this.api.request('/api/v1/household');
+      const family = await this.api.refreshHousehold();
       if (generation !== this.generation || !this.loggedIn) { return; }
-      const family = response.data as FamilyData;
       this.familyNodes = family.devices || [];
-      this.familyRole = family.role;
+      this.familyRole = family.role || '';
       this.familyMessage = this.familyNodes.length ? '同一家庭，分布守护' : '暂未绑定设备';
     } catch (error) {
       if (generation === this.generation) { this.familyMessage = '房间与随身设备可从下方入口查看'; }
@@ -248,17 +242,24 @@ struct Index {
     if (!this.loggedIn || !this.visible || this.polling) { return; }
     const generation = this.generation; this.polling = true; this.loading = true;
     try {
-      const response = await this.api.request(this.api.path('shadow'));
+      await this.refreshFamily();
       if (generation !== this.generation || !this.visible) { return; }
-      const shadow = response.data as Shadow;
+      const gateway = this.familyNodes.find((node: DistributedNode) => node.device_id === this.api.device && node.kind === 'gateway');
+      let shadow: Shadow;
+      if (gateway && gateway.properties && readingFresh(gateway.updated_at, Date.now())) {
+        shadow = {properties:gateway.properties as Properties,updated_at:gateway.updated_at || '',online:gateway.online === true};
+      } else {
+        const response = await this.api.request(this.api.path('shadow'));
+        if (generation !== this.generation || !this.visible) { return; }
+        shadow = response.data as Shadow;
+        this.simulated = response.simulated === true;
+      }
       this.applyProperties(shadow.properties || {});
-      this.online = shadow.online === true; this.simulated = response.simulated === true;
+      this.online = shadow.online === true || readingFresh(shadow.updated_at,Date.now());
       this.deviceTime = shadow.updated_at ? Date.parse(shadow.updated_at) : 0;
-      if (!full && this.refreshCount % 2 === 0) { await this.refreshFamily(); }
       this.received = Date.now(); this.refreshCount++; this.error = '';
       this.pruneAlerts();
       if (full) {
-        await this.refreshFamily();
         const health = await this.api.request(this.api.path('health'));
         if (generation !== this.generation) { return; }
         if (health.data) { this.applyHealth(health.data as Health); } else { this.healthKnown = false; this.living=null;this.medicineNotice=false; }
@@ -868,23 +869,23 @@ struct Index {
         }.width('100%').margin({bottom:12})
         Text('主机守护居家，星闪连接房间与随身健康。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
         if (this.familyRole) { Text(this.familyRole==='owner'?'家庭管理员':this.familyRole==='viewer'?'只读成员':'照护成员').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%') }
-        ForEach(this.familyNodes, (node: FamilyNode) => {
+        ForEach(this.familyNodes, (node: DistributedNode) => {
           Column({space:6}) {
             Row() { Text(node.name).fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text(node.room).fontSize(this.readableSize(12)).fontColor(SUB) }.width('100%')
             Text(node.kind==='wearable'?'随身健康节点':node.kind==='nearlink'?'星闪分布节点':'居家安全主机').fontSize(this.readableSize(12)).fontColor(PRIMARY).width('100%')
-            if (node.kind==='nearlink') {
+            if (node.kind==='nearlink'||node.kind==='environment') {
               if (node.properties) {
-                Text('光照 '+(node.properties.light===undefined?'待更新':node.properties.light)+'  ·  烟雾 '+(node.properties.smoke===undefined?'待更新':node.properties.smoke)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
-                Text('人体 '+(node.properties.body===undefined?'待更新':node.properties.body===1?'检测到活动':'未检测到活动')+'  ·  房门 '+(node.properties.door==='OPEN'?'开':node.properties.door==='CLOSED'?'关':'待更新')).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+                Text('光照 '+sensorText(node.properties.light,' mV')+'  ·  烟雾 '+sensorText(node.properties.smoke,' mV')).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+                Text('人体 '+motionText(node.properties.body)+'  ·  房门 '+roomDoorText(node.properties.door)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
                 Text('上报时间 '+(node.updated_at || '待确认')).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
               } else { Text('等待节点实际属性上报').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
             }
             if (node.watch) {
-              Text('心率 '+watchVital(node.watch.heart_rate,' 次/分',240)+'  ·  血氧 '+watchVital(node.watch.spo2,'%',100)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
-              Text('采集时间 '+node.watch.received_at).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
+              Text('心率 '+heartText(node.watch)+' 次/分'+'  ·  血氧 '+watchVital(node.watch.spo2,'%',100)).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+              Text((readingFresh(node.watch.received_at,this.now)?'近期上报 · ':'数据待更新 · ')+(node.watch.received_at || '时间待确认')).fontSize(this.readableSize(11)).fontColor(SUB).width('100%')
             } else if (node.kind==='wearable') { Text('等待手表上报，不显示模拟健康值').fontSize(this.readableSize(12)).fontColor(SUB).width('100%') }
           }.padding({top:14,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line}).width('100%')
-        }, (node: FamilyNode) => node.device_id)
+        }, (node: DistributedNode) => node.device_id)
         if (!this.familyNodes.length) { Text('可从上方入口查看已授权节点的数据').fontSize(this.readableSize(13)).fontColor(SUB).padding({top:12,bottom:12}) }
         Button('查看摄像头实时画面 ›').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{router.pushUrl({url:'pages/Camera'});})
       }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(16).width('100%').margin({bottom:18})
@@ -904,7 +905,7 @@ struct Index {
       if (this.loggedIn) { Button('退出登录并返回演示').width('100%').height(45).fontSize(this.readableSize(13)).fontColor(SUB).backgroundColor('#E8EEF0').borderRadius(14).margin({top:10}).onClick(()=>{this.disconnect();}) }
       Column({space:8}) { Text('AP 与 STA').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('STA：开发板连接热点后上云，本 App 通过后端访问。AP：开发板开启 HomeSafety 热点，可直接通过浏览器访问 192.168.2.1:8080/status。两种模式由板上长按 K5 切换。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)); Text('App 不使用开发板设备密钥登录 MQTT，不会抢占开发板连接。').fontSize(this.readableSize(11)).fontColor(PRIMARY).lineHeight(this.readableLine(20)) }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(18).margin({top:18})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%') }
-      Text('颐鸿安 1.8.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
+      Text('颐鸿安 1.9.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
     }.width('100%')
   }
   @Builder
@@ -963,7 +964,7 @@ struct Index {
       Column() {
         Row() { Text('账户与连接').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text(this.loggedIn?'管理 ›':'登录 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY) }.width('100%').padding({top:16,bottom:16}).onClick(()=>{this.openConnection();})
         Row() { Text('查看设备状态').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text('›').fontSize(this.readableSize(18)).fontColor(SUB) }.width('100%').padding({top:16,bottom:16}).border({width:{top:0.5},color:'#EEF2F3'}).onClick(()=>{this.navigate(3);})
-        this.info({label:'应用版本',value:'颐鸿安 1.8.0',color:INK})
+        this.info({label:'应用版本',value:'颐鸿安 1.9.0',color:INK})
         Text('守护建议用于解释监测状态，不提供个人健康评分或诊断。报警需结合现场核实，确认处理与设备消音含义不同。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%').padding({top:12,bottom:8})
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(20)
       if (this.loggedIn) { Button('退出登录').width('100%').height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(CareTheme.alarmSurface).borderRadius(14).margin({top:20}).onClick(()=>{this.disconnect();}) }

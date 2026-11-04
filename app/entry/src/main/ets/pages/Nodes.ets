@@ -4,7 +4,7 @@ import { DeviceSession } from '../services/DeviceSession';
 import { Envelope } from '../models/Models';
 import { DistributedFamily, DistributedNode, EnvironmentProperties, EnvironmentShadow, EnvironmentHealth,
   WearReading, WearHour, WearFall, WearHours, WearFalls, sensorText, motionText, roomDoorText,
-  watchVital, readingFresh, reportAge, hourLabel } from '../models/Distributed';
+  watchVital, heartText, environmentNodes, readingFresh, reportAge, hourLabel } from '../models/Distributed';
 
 interface NodeRoute { kind?: string; }
 interface NodeMetric { label: string; value: string; unit: string; symbol: Resource; }
@@ -50,18 +50,14 @@ struct Nodes {
     const api = DeviceSession.backend;
     const token = api.token;
     try {
-      const response = await api.request('/api/v1/household');
+      const family = await api.refreshHousehold();
       if (!this.active || token !== api.token) { return; }
-      const family = response.data as DistributedFamily;
-      this.nodes = (family.devices || []).filter((node: DistributedNode) => node.kind === 'nearlink' || node.kind === 'environment');
+      this.nodes = environmentNodes(family.devices || []);
       this.catalogMessage = '按设备独立采集，互不覆盖';
     } catch (_) {
       if (!this.active || token !== api.token) { return; }
-      // API 1.4.0 has device_ids at login, but no household endpoint.
-      this.nodes = api.deviceIds.filter((id: string) => id !== api.device).map((id: string, index: number): DistributedNode => {
-        return {device_id:id,kind:'environment',name:'星闪环境节点 ' + (index + 1),room:'房间待设置'};
-      });
-      this.catalogMessage = '设备查看范围由当前账号授权';
+      this.nodes = environmentNodes(api.family.devices);
+      this.catalogMessage = this.nodes.length ? '使用已授权设备清单，正在等待恢复连接' : '无法取得带类型的设备清单，请更新后端并重新登录';
     }
     if (!this.environmentId) { this.environmentId = this.nodes.length ? this.nodes[0].device_id : ''; }
     this.refresh();
@@ -138,7 +134,7 @@ struct Nodes {
   }
   private watchValue(field: string): string {
     if (!this.watch) { return '待上报'; }
-    if (field === 'heart') { return watchVital(this.watch.heart_rate,'',240); }
+    if (field === 'heart') { return heartText(this.watch); }
     if (field === 'oxygen') { return watchVital(this.watch.spo2,'',100); }
     return sensorText(this.watch.steps,'');
   }
