@@ -7,6 +7,7 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { CameraFeed } from '../services/CameraFeed';
+import { CameraViewing } from '../services/CameraViewing';
 import { DeviceSession } from '../services/DeviceSession';
 import { RecordedFrame, makeAvi } from '../models/CameraMedia';
 import { CameraConnection, CameraFound } from '../services/CameraConnection';
@@ -29,6 +30,7 @@ struct HomeCameraPage {
   private generation: number = 0;
   private visible:boolean=false;
   private feed:CameraFeed=new CameraFeed();
+  private viewing:CameraViewing=new CameraViewing();
   @State smooth:boolean=true;
   @State remote:boolean=true;
   @State recording:boolean=false;
@@ -124,6 +126,8 @@ struct HomeCameraPage {
 
   aboutToAppear(): void { this.visible=true;this.restore().then(()=>{if(this.visible){this.connect();}}); }
   aboutToDisappear(): void { this.visible=false;this.stop(); }
+  onPageHide():void{this.visible=false;this.stop();}
+  onPageShow():void{if(!this.visible){this.visible=true;this.connect();}}
   private async restore(): Promise<void> {
     try {
       const context=getContext(this) as common.UIAbilityContext;
@@ -133,6 +137,7 @@ struct HomeCameraPage {
     } catch (error) { this.address=''; }
   }
   private async releaseStream(): Promise<void> {
+    this.viewing.stop();
     this.feed.stop();this.queued=null;this.latest=null;this.finishRecording();
     if(this.frameTimer>=0){clearTimeout(this.frameTimer);this.frameTimer=-1;}
     const old=this.frame;this.frame=undefined;
@@ -184,8 +189,10 @@ struct HomeCameraPage {
         if(generation!==this.generation){return;}
         const status=response.data as RemoteCameraStatus;
         if(!status.configured){throw new Error('摄像头尚未绑定，请管理员完成一次性配置');}
+        await this.viewing.start(api,(message:string)=>{if(generation===this.generation){this.failed=true;this.message=message;}});
+        if(generation!==this.generation){return;}
         this.source=api.base;this.settingsOpen=false;
-        this.message=status.online?'已连接服务器，正在加载画面':'摄像头暂未上传，恢复联网后将自动显示';
+        this.message=status.online?'已连接服务器，正在加载画面':'正在唤醒摄像头，请稍候…';
         if(this.smooth){this.startFeed(generation);}else{this.refreshFrame(generation);}
         return;
       }
@@ -263,7 +270,7 @@ struct HomeCameraPage {
           Button('使用此地址连接').enabled(!this.busy).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{this.connect(true);})
         }.width('100%')
       }
-      Text(this.remote?'低帧率远程查看 · 退出停止播放 · 录像需手动保存':'同一局域网直连 · 退出页面停止加载').fontSize(11).fontColor(CareTheme.secondary).margin({bottom:8})
+      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':'同一局域网直连 · 退出页面停止加载').fontSize(11).fontColor(CareTheme.secondary).margin({bottom:8})
     }.padding({left:20,right:20,top:12,bottom:18}).width('100%').height('100%').backgroundColor(CareTheme.background)
   }
 }

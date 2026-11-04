@@ -215,7 +215,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.5.0',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.5.1',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -235,7 +235,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.5.0','camera_transport':'jpeg-relay'})
+                         'api_version':'1.5.1','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
     from .camera import CameraService

@@ -905,7 +905,7 @@ struct Index {
       if (this.loggedIn) { Button('退出登录并返回演示').width('100%').height(45).fontSize(this.readableSize(13)).fontColor(SUB).backgroundColor('#E8EEF0').borderRadius(14).margin({top:10}).onClick(()=>{this.disconnect();}) }
       Column({space:8}) { Text('AP 与 STA').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('STA：开发板连接热点后上云，本 App 通过后端访问。AP：开发板开启 HomeSafety 热点，可直接通过浏览器访问 192.168.2.1:8080/status。两种模式由板上长按 K5 切换。').fontSize(this.readableSize(12)).fontColor(SUB).lineHeight(this.readableLine(21)); Text('App 不使用开发板设备密钥登录 MQTT，不会抢占开发板连接。').fontSize(this.readableSize(11)).fontColor(PRIMARY).lineHeight(this.readableLine(20)) }.padding(18).backgroundColor(CareTheme.softBlue).borderRadius(18).margin({top:18})
       if (this.error) { Text(this.error).fontSize(this.readableSize(12)).fontColor(RED).padding(12).width('100%') }
-      Text('颐鸿安 1.9.0 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
+      Text('颐鸿安 1.9.1 · 比赛演示版').fontSize(this.readableSize(11)).fontColor(SUB).margin({top:24,bottom:18})
     }.width('100%')
   }
   @Builder
@@ -964,7 +964,7 @@ struct Index {
       Column() {
         Row() { Text('账户与连接').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text(this.loggedIn?'管理 ›':'登录 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY) }.width('100%').padding({top:16,bottom:16}).onClick(()=>{this.openConnection();})
         Row() { Text('查看设备状态').fontSize(this.readableSize(14)).fontColor(INK); Blank(); Text('›').fontSize(this.readableSize(18)).fontColor(SUB) }.width('100%').padding({top:16,bottom:16}).border({width:{top:0.5},color:'#EEF2F3'}).onClick(()=>{this.navigate(3);})
-        this.info({label:'应用版本',value:'颐鸿安 1.9.0',color:INK})
+        this.info({label:'应用版本',value:'颐鸿安 1.9.1',color:INK})
         Text('守护建议用于解释监测状态，不提供个人健康评分或诊断。报警需结合现场核实，确认处理与设备消音含义不同。').fontSize(this.readableSize(11)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%').padding({top:12,bottom:8})
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(20)
       if (this.loggedIn) { Button('退出登录').width('100%').height(this.elderMode ? 60 : 46).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(CareTheme.alarmSurface).borderRadius(14).margin({top:20}).onClick(()=>{this.disconnect();}) }

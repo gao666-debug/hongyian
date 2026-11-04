@@ -86,7 +86,7 @@ void streamTask(void *) {
 
 void statusPage() {
   if (!authorized()) return;
-  String json = "{\"firmware\":\"camera-v0.3\",\"camera_ready\":";
+  String json = "{\"firmware\":\"camera-v0.3.1\",\"camera_ready\":";
   json += cameraReady ? "true" : "false";
   json += ",\"camera_error\":" + String(static_cast<int>(cameraError));
   json += ",\"wifi_connected\":";
@@ -97,6 +97,7 @@ void statusPage() {
   json += ",\"uptime_s\":" + String(millis() / 1000);
   if (cameraReady) json += ",\"sensor_pid\":" + String(esp_camera_sensor_get()->id.PID);
   json += ",\"cloud_online\":" + String(cloudOnline ? "true" : "false");
+  json += ",\"cloud_viewing\":" + String(cloudViewing ? "true" : "false");
   json += ",\"cloud_code\":" + String(cloudLastCode);
   json += "}";
   server.sendHeader("Cache-Control", "no-store");
@@ -141,7 +142,7 @@ void initCamera() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n[boot] YiHongAn Camera v0.3");
+  Serial.println("\n[boot] YiHongAn Camera v0.3.1");
   cameraLock = xSemaphoreCreateMutex();
   if (!cameraLock) {
     Serial.println("[camera] mutex allocation failed");

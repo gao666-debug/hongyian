@@ -31,6 +31,7 @@ class CameraTests(unittest.TestCase):
     def grant(self):
         r=self.c.post(self.base+'/provision',headers=self.owner)
         self.assertEqual(r.status_code,201)
+        self.assertEqual(self.c.post(self.base+'/viewing',headers=self.owner).status_code,200)
         return {'X-Camera-Token':r.json()['data']['camera_token'],'Content-Type':'image/jpeg'}
 
     def test_three_devices_kinds_and_persistent_migration(self):
@@ -101,5 +102,37 @@ class CameraTests(unittest.TestCase):
         again=TestClient(create_app(self.settings))
         try:
             self.assertFalse(again.get(self.base,headers=self.owner).json()['data']['online'])
+            self.assertEqual(again.post(self.base+'/frame',headers=auth,content=JPEG).status_code,409)
+            self.assertEqual(again.post(self.base+'/viewing',headers=self.owner).status_code,200)
             self.assertEqual(again.post(self.base+'/frame',headers=auth,content=JPEG).status_code,200)
         finally:again.close()
+
+    def test_on_demand_two_phones_timeout_and_idle_upload_rejection(self):
+        r=self.c.post(self.base+'/provision',headers=self.owner)
+        auth={'X-Camera-Token':r.json()['data']['camera_token'],'Content-Type':'image/jpeg'}
+        demand=self.base+'/demand'
+        self.assertEqual(self.c.get(demand).status_code,401)
+        self.assertEqual(self.c.get(demand,headers=auth).headers['X-Camera-Active'],'0')
+        self.assertEqual(self.c.post(self.base+'/frame',headers=auth,content=JPEG).status_code,409)
+        first=self.c.post(self.base+'/viewing',headers=self.owner).json()['data']['view_id']
+        other=self.login('guardian','test-password')
+        second=self.c.post(self.base+'/viewing',headers=other).json()['data']['view_id']
+        self.assertEqual(self.c.get(demand,headers=auth).headers['X-Camera-Active'],'1')
+        self.assertEqual(self.c.delete(self.base+'/viewing/'+first,headers=other).status_code,404)
+        self.assertEqual(self.c.put(self.base+'/viewing/'+first,headers=other).status_code,404)
+        self.assertEqual(self.c.delete(self.base+'/viewing/'+first,headers=self.owner).status_code,200)
+        self.assertEqual(self.c.get(demand,headers=auth).headers['X-Camera-Active'],'1')
+        self.assertEqual(self.c.post(self.base+'/frame',headers=auth,content=JPEG).status_code,200)
+        self.assertEqual(self.c.put(self.base+'/viewing/'+second,headers=other).status_code,200)
+        # Last phone closes normally: no image retained and no further uploads accepted.
+        self.assertEqual(self.c.delete(self.base+'/viewing/'+second,headers=other).status_code,200)
+        self.assertEqual(self.c.get(demand,headers=auth).headers['X-Camera-Active'],'0')
+        self.assertEqual(self.c.get(self.base+'/frame',headers=self.owner).status_code,503)
+        self.assertEqual(self.c.post(self.base+'/frame',headers=auth,content=JPEG).status_code,409)
+        second=self.c.post(self.base+'/viewing',headers=other).json()['data']['view_id']
+        # Simulates a crashed/offline App: no explicit stop, only lease expiry.
+        with patch('backend.camera.time.monotonic',return_value=time.monotonic()+21):
+            self.assertEqual(self.c.get(demand,headers=auth).headers['X-Camera-Active'],'0')
+            self.assertEqual(self.c.get(self.base+'/frame',headers=self.owner).status_code,503)
+            self.assertEqual(self.c.post(self.base+'/frame',headers=auth,content=JPEG).status_code,409)
+        self.assertEqual(self.c.delete(self.base+'/viewing/'+second,headers=other).status_code,200)

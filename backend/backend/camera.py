@@ -7,11 +7,12 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import Depends, Header, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 
 MAX_FRAME = 512 * 1024
 FRESH_SECONDS = 15
+VIEW_SECONDS = 20
 
 
 class CameraService:
@@ -21,6 +22,7 @@ class CameraService:
         self.last_upload = {}
         self.viewers = {}
         self.uploading = set()
+        self.leases = {}
         with store.connection() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS cameras(
                 mode TEXT,device TEXT,token_hash TEXT,PRIMARY KEY(mode,device))''')
@@ -31,13 +33,30 @@ class CameraService:
                               (self.settings.mode, device)).fetchone()
 
     def status(self, device):
+        active = self.demand(device)
         frame = self.latest.get(device)
         stamp = frame[0] if frame else None
         return {'configured': self.binding(device) is not None,
                 'online': bool(frame and time.time() - stamp <= FRESH_SECONDS),
                 'received_at': datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else None,
                 'bytes': len(frame[1]) if frame else 0, 'transport': 'jpeg-relay',
-                'target_fps': 2, 'max_frame_bytes': MAX_FRAME}
+                'target_fps': 2, 'max_frame_bytes': MAX_FRAME, 'viewing': active}
+
+    def demand(self, device):
+        now = time.monotonic()
+        for key, grant in list(self.leases.items()):
+            valid = grant['until'] > now and self.store.session(grant['session'])
+            if valid:
+                try: self.homes.authorize(grant['username'], grant['device'])
+                except HTTPException: valid = False
+            if not valid: self.leases.pop(key, None)
+        active = any(g['device'] == device for g in self.leases.values())
+        if not active: self.latest.pop(device, None)
+        return active
+
+    def clear_views(self, device):
+        for key, grant in list(self.leases.items()):
+            if grant['device'] == device: self.leases.pop(key, None)
 
     def authorize_camera(self, device, token):
         row = self.binding(device)
@@ -53,15 +72,21 @@ class CameraService:
 
     async def frames(self, device, user, disconnected):
         previous = None
+        waiting = time.monotonic()
         try:
             while not await disconnected():
                 if not self.store.session(user['token_hash']):
                     return
+                if not self.demand(device): return
                 try:
                     self.homes.authorize(user['username'], device)
-                    stamp, jpeg = self.frame(device)
                 except HTTPException:
                     return
+                try: stamp, jpeg = self.frame(device)
+                except HTTPException:
+                    if previous is not None or time.monotonic() - waiting > 20: return
+                    await asyncio.sleep(0.2)
+                    continue
                 if stamp != previous:
                     previous = stamp
                     yield b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' + jpeg + b'\r\n'
@@ -71,7 +96,7 @@ class CameraService:
 
     def install(self, app, session, envelope):
         @app.post('/api/v1/devices/{device}/camera/provision', status_code=201)
-        def provision(device, user=Depends(session)):
+        async def provision(device, user=Depends(session)):
             self.homes.authorize(user['username'], device, control=True)
             with self.store.connection() as db:
                 role = db.execute('SELECT role FROM home_members WHERE username=?', (user['username'],)).fetchone()
@@ -85,12 +110,13 @@ class CameraService:
                            (self.settings.mode, device, hashlib.sha256(token.encode()).hexdigest()))
             self.latest.pop(device, None)
             self.last_upload.pop(device, None)
+            self.clear_views(device)
             # Returned once to provisioning tooling; only its hash is stored.
             return envelope({'camera_token': token, 'device_id': device,
                              'upload_path': f'/api/v1/devices/{device}/camera/frame'})
 
         @app.delete('/api/v1/devices/{device}/camera')
-        def revoke(device, user=Depends(session)):
+        async def revoke(device, user=Depends(session)):
             self.homes.authorize(user['username'], device, control=True)
             with self.store.connection() as db:
                 role = db.execute('SELECT role FROM home_members WHERE username=?', (user['username'],)).fetchone()
@@ -98,11 +124,52 @@ class CameraService:
                 db.execute('DELETE FROM cameras WHERE mode=? AND device=?', (self.settings.mode, device))
             self.latest.pop(device, None)
             self.last_upload.pop(device, None)
+            self.clear_views(device)
             return envelope({'revoked': True})
+
+        @app.post('/api/v1/devices/{device}/camera/viewing')
+        async def begin_view(device, user=Depends(session)):
+            self.homes.authorize(user['username'], device)
+            if not self.binding(device): raise HTTPException(404, 'Camera not configured')
+            self.demand(device)
+            if sum(g['device'] == device for g in self.leases.values()) >= 4:
+                raise HTTPException(429, 'Too many camera viewers')
+            key = secrets.token_urlsafe(18)
+            self.leases[key] = {'device': device, 'session': user['token_hash'],
+                                'username': user['username'], 'until': time.monotonic() + VIEW_SECONDS}
+            return envelope({'view_id': key, 'expires_in': VIEW_SECONDS})
+
+        @app.put('/api/v1/devices/{device}/camera/viewing/{view_id}')
+        async def renew_view(device, view_id, user=Depends(session)):
+            self.homes.authorize(user['username'], device)
+            self.demand(device)
+            grant = self.leases.get(view_id)
+            if not grant or grant['device'] != device or grant['session'] != user['token_hash']:
+                raise HTTPException(404, 'Viewing session expired')
+            grant['until'] = time.monotonic() + VIEW_SECONDS
+            return envelope({'view_id': view_id, 'expires_in': VIEW_SECONDS})
+
+        @app.delete('/api/v1/devices/{device}/camera/viewing/{view_id}')
+        async def end_view(device, view_id, user=Depends(session)):
+            self.homes.authorize(user['username'], device)
+            grant = self.leases.get(view_id)
+            if grant and (grant['device'] != device or grant['session'] != user['token_hash']):
+                raise HTTPException(404, 'Viewing session not found')
+            self.leases.pop(view_id, None)
+            self.demand(device)
+            return envelope({'stopped': True})
+
+        @app.get('/api/v1/devices/{device}/camera/demand')
+        async def camera_demand(device, x_camera_token: str = Header(default='')):
+            self.authorize_camera(device, x_camera_token)
+            active = self.demand(device)
+            return JSONResponse(envelope({'active': active}),
+                                headers={'X-Camera-Active': '1' if active else '0', 'Cache-Control': 'no-store'})
 
         @app.post('/api/v1/devices/{device}/camera/frame')
         async def upload(device, request: Request, x_camera_token: str = Header(default='')):
             self.authorize_camera(device, x_camera_token)
+            if not self.demand(device): raise HTTPException(409, 'No active viewers; pause upload')
             if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'image/jpeg':
                 raise HTTPException(415, 'JPEG required')
             now = time.monotonic()
@@ -126,17 +193,18 @@ class CameraService:
                 raise HTTPException(415, 'Invalid JPEG markers')
             # Recheck after receiving the body: credentials might have been rotated meanwhile.
             self.authorize_camera(device, x_camera_token)
+            if not self.demand(device): raise HTTPException(409, 'Viewing ended; pause upload')
             self.last_upload[device] = time.monotonic()
             self.latest[device] = (time.time(), bytes(raw))
             return envelope(self.status(device))
 
         @app.get('/api/v1/devices/{device}/camera')
-        def status(device, user=Depends(session)):
+        async def status(device, user=Depends(session)):
             self.homes.authorize(user['username'], device)
             return envelope(self.status(device))
 
         @app.get('/api/v1/devices/{device}/camera/frame')
-        def snapshot(device, user=Depends(session)):
+        async def snapshot(device, user=Depends(session)):
             self.homes.authorize(user['username'], device)
             _, jpeg = self.frame(device)
             return Response(jpeg, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
@@ -144,7 +212,8 @@ class CameraService:
         @app.get('/api/v1/devices/{device}/camera/stream')
         async def stream(device, request: Request, user=Depends(session)):
             self.homes.authorize(user['username'], device)
-            self.frame(device)
+            if not self.binding(device): raise HTTPException(404, 'Camera not configured')
+            if not self.demand(device): raise HTTPException(409, 'Start a viewing session first')
             if self.viewers.get(device, 0) >= 4: raise HTTPException(429, 'Too many camera viewers')
             self.viewers[device] = self.viewers.get(device, 0) + 1
             return StreamingResponse(self.frames(device, user, request.is_disconnected),
