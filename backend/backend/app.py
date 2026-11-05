@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 import uuid
 from typing import Literal
+import anyio
 
 from fastapi import FastAPI, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -46,6 +47,7 @@ class Command(StrictModel):
 class Note(StrictModel):
     note: str = Field(min_length=1,max_length=2000)
     resolution: Literal['handled','false_alarm','follow_up']
+    client_request_id: str | None = Field(default=None,min_length=1,max_length=128)
 
 class AppSOS(StrictModel):
     client_request_id: str = Field(min_length=1,max_length=128)
@@ -123,28 +125,22 @@ class Stats(BaseModel):
 
 class Hub:
     def __init__(self):
-        # 两种订阅维度并存：设备事件推给「订阅了这台设备」的连接，
-        # 聊天消息推给「这个账号」的所有连接（同一账号可能多台手机）。
         self.clients = defaultdict(set)
         self.users = defaultdict(set)
 
-    @staticmethod
-    def _push(queue, event, resync):
-        if queue.full():
-            while not queue.empty(): queue.get_nowait()
-            queue.put_nowait(resync)
-        else:
-            queue.put_nowait(event)
-
-    async def publish(self, device, event):
-        for queue in tuple(self.clients[device]):
-            # 设备事件的 resync 事件保留 device_id，App 靠它判断哪台设备要重拉
-            self._push(queue, event,
-                       {'type':'resync_required','device_id':device,'timestamp':utc()})
-
     async def publish_user(self, username, event):
         for queue in tuple(self.users[username]):
-            self._push(queue, event, {'type':'resync_required','timestamp':utc()})
+            if queue.full():
+                while not queue.empty(): queue.get_nowait()
+                queue.put_nowait({'type':'resync_required','timestamp':utc()})
+            else: queue.put_nowait(event)
+    async def publish(self, device, event):
+        for queue in tuple(self.clients[device]):
+            if queue.full():
+                while not queue.empty(): queue.get_nowait()
+                queue.put_nowait({'type':'resync_required','device_id':device,'timestamp':utc()})
+            else:
+                queue.put_nowait(event)
 
 
 def create_app(settings=None, cloud=None):
@@ -164,9 +160,9 @@ def create_app(settings=None, cloud=None):
         return {'code':code,'message':message,'data':data,'request_id':uuid.uuid4().hex,
                 'mode':settings.mode,'simulated':settings.mode=='mock'}
 
-    def check_device(device, user=None, control=False):
+    def check_device(device, user=None, control=False,permission=None):
         if not settings.has_device(device): raise HTTPException(404,'Device not configured')
-        if user is not None: homes.authorize(user['username'], device, control)
+        if user is not None: homes.authorize(user['username'], device, control,permission)
 
     def session(authorization: str | None = Header(default=None)):
         if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Login required')
@@ -242,7 +238,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.9.1',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.10.0',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -262,20 +258,13 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.9.1','camera_transport':'jpeg-relay'})
+                         'api_version':'1.10.0','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
-
-    # 账号间消息：好友、会话（单聊/群聊）、媒体。推送走 hub.users（账号维度），
-    # 与设备事件的 hub.clients（设备维度）互不干扰。
     from .messaging import Messaging
     chats = Messaging(store, settings)
     app.state.chats = chats
-
-    async def notify_user(username, event):
-        await hub.publish_user(username, event)
-
-    chats.install(app, session, envelope, notify_user)
+    chats.install(app, session, envelope, hub.publish_user)
     from .camera import CameraService
     cameras = CameraService(store, settings, homes)
     cameras.install(app, session, envelope)
@@ -293,7 +282,8 @@ def create_app(settings=None, cloud=None):
         if not token: raise HTTPException(401,'Invalid username or password')
         return envelope({'access_token':token,'token_type':'Bearer','expires_in':settings.token_seconds,
                          'username':body.username,'device_ids':homes.device_ids(body.username),
-                         'devices':homes.describe(body.username)})
+                         'devices':homes.describe(body.username),'role':homes.role(body.username),
+                         'permissions':homes.permissions(body.username)})
 
     @app.post('/api/v1/auth/logout')
     def logout(user=Depends(session)):
@@ -495,7 +485,7 @@ def create_app(settings=None, cloud=None):
 
     @app.post('/api/v1/ws-ticket')
     def ws_ticket(device_id: str=Query(...),user=Depends(session)):
-        check_device(device_id,user)
+        check_device(device_id,user,permission='alarms.read')
         return envelope({'ticket':store.ticket(user['token_hash'],device_id),'expires_in':30,
                          'path':'/api/v1/ws','device_id':device_id})
 
@@ -504,19 +494,17 @@ def create_app(settings=None, cloud=None):
         if device_id not in homes.configured_ids():
             await ws.close(code=4404); return
         grant = store.consume_ticket(ticket,device_id)
-        sess = store.session(grant['session_hash']) if grant else None
-        if not sess:
+        active=store.session(grant['session_hash']) if grant else None
+        if not active:
             await ws.close(code=4401); return
-        ws_user = sess['username']
         try:
-            homes.authorize(ws_user,device_id)
+            homes.authorize(active['username'],device_id,permission='alarms.read')
         except HTTPException:
             await ws.close(code=4403); return
         await ws.accept()
         queue = asyncio.Queue(maxsize=100)
         hub.clients[device_id].add(queue)
-        # 同一条连接同时订阅本账号：这样聊天消息不用另开 WebSocket
-        hub.users[ws_user].add(queue)
+        hub.users[active['username']].add(queue)
         await ws.send_json({'schema':1,'type':'hello','device_id':device_id,'timestamp':utc(),
                            'mode':settings.mode,'simulated':settings.mode=='mock'})
         async def sender():
@@ -525,10 +513,16 @@ def create_app(settings=None, cloud=None):
                     await ws.close(code=4401); return
                 try: event=await asyncio.wait_for(queue.get(),timeout=15)
                 except asyncio.TimeoutError: event={'type':'ping','timestamp':utc()}
-                if not store.session(grant['session_hash']):
+                current=store.session(grant['session_hash'])
+                if not current:
                     await ws.close(code=4401); return
+                try: homes.authorize(current['username'],device_id,permission='alarms.read')
+                except HTTPException:
+                    await ws.close(code=4403); return
+                # Incident-only roles never receive health, camera or command payloads.
+                if 'view' not in homes.permissions(current['username']) and event['type'] not in ('alarm','alarm_note','alarm_claim','ping','resync_required','message'): continue
                 if event.get('type') == 'message':
-                    try: chats.require_member(event.get('conversation_id'), ws_user)
+                    try: chats.require_member(event.get('conversation_id'), current['username'])
                     except HTTPException: continue
                 await ws.send_json(event)
                 if event['type']=='resync_required':
@@ -544,14 +538,15 @@ def create_app(settings=None, cloud=None):
             done,pending=await asyncio.wait([send_task,receive_task],return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try: task.result()
-                except (WebSocketDisconnect,RuntimeError,asyncio.CancelledError): pass
+                except (WebSocketDisconnect,RuntimeError): pass
+        except asyncio.CancelledError:
+            pass
         finally:
             send_task.cancel(); receive_task.cancel()
-            import anyio
+            hub.clients[device_id].discard(queue)
+            hub.users[active['username']].discard(queue)
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(send_task,receive_task,return_exceptions=True)
-            hub.clients[device_id].discard(queue)
-            hub.users[ws_user].discard(queue)
 
     async def ingest_nearlink(device,payload):
         services=payload.get('services') or [payload]
@@ -763,13 +758,15 @@ def create_app(settings=None, cloud=None):
 
     @app.post('/api/v1/devices/{device}/alarms/batch-notes')
     async def batch_notes(device,body: BatchNotes,user=Depends(session)):
-        check_device(device,user,control=True)
+        check_device(device,user,permission='alarms.handle')
         keys=list(dict.fromkeys(body.event_keys))
         changed=[]
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             # Validate entire snapshot before writing any notes.
             for key in keys:
+                claim=db.execute('SELECT username FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,key)).fetchone()
+                if claim and claim['username']!=user['username']: raise HTTPException(409,'Alarm is being handled by another member')
                 if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',
                                   (settings.mode,device,'alarm',key)).fetchone():
                     raise HTTPException(404,'Alarm not found')
@@ -780,6 +777,7 @@ def create_app(settings=None, cloud=None):
                 db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
                            (settings.mode,device,key,user['username'],body.note,body.resolution,time.time()))
                 changed.append(key)
+                db.execute('DELETE FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,key))
         for key in changed: await publish(device,'alarm_note',{'event_key':key,'resolution':body.resolution})
         return envelope({'handled_keys':changed,'requested_count':len(keys)})
 
@@ -792,7 +790,7 @@ def create_app(settings=None, cloud=None):
 
     @app.get('/api/v1/devices/{device}/alarms')
     def alarms(device,limit: int=Query(default=50,ge=1,le=100),offset: int=Query(default=0,ge=0),user=Depends(session)):
-        check_device(device,user)
+        check_device(device,user,permission='alarms.read')
         items=store.list_docs(settings.mode,device,'alarm',limit,offset)
         with store.connection() as db:
             for item in items:
@@ -800,25 +798,67 @@ def create_app(settings=None, cloud=None):
                 note=db.execute('SELECT resolution,username,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id DESC LIMIT 1',
                                 (settings.mode,device,key)).fetchone()
                 if note: item['handling']=dict(note)
+                claim=db.execute('SELECT username,created FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,key)).fetchone()
+                if claim: item['claim']=dict(claim)
+                if note: item['handling']['account_deleted']=bool(db.execute('SELECT 1 FROM deleted_accounts WHERE username=?',(note['username'],)).fetchone())
         return envelope({'items':items,'limit':limit,'offset':offset})
+
+    @app.post('/api/v1/devices/{device}/alarms/{event_key}/claim')
+    async def claim_alarm(device,event_key,user=Depends(session)):
+        check_device(device,user,permission='alarms.handle')
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(settings.mode,device,'alarm',event_key)).fetchone(): raise HTTPException(404,'Alarm not found')
+            note=db.execute('SELECT resolution FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id DESC LIMIT 1',(settings.mode,device,event_key)).fetchone()
+            if note and note['resolution']!='follow_up': raise HTTPException(409,'Alarm already handled')
+            row=db.execute('SELECT username,created FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key)).fetchone()
+            if row and row['username']!=user['username']: raise HTTPException(409,'Alarm is being handled by another member')
+            data=dict(row) if row else {'username':user['username'],'created':time.time()}
+            if not row: db.execute('INSERT INTO alarm_claims VALUES(?,?,?,?,?)',(settings.mode,device,event_key,data['username'],data['created']))
+        await publish(device,'alarm_claim',{'event_key':event_key,'claim':data})
+        return envelope(data)
+
+    @app.delete('/api/v1/devices/{device}/alarms/{event_key}/claim')
+    async def release_alarm(device,event_key,user=Depends(session)):
+        check_device(device,user,permission='alarms.handle')
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT username FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key)).fetchone()
+            if row and row['username']!=user['username'] and homes.role(user['username'])!='owner': raise HTTPException(403,'Only claimant or administrator can release')
+            db.execute('DELETE FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key))
+        await publish(device,'alarm_claim',{'event_key':event_key,'claim':None})
+        return envelope({'released':True})
 
     @app.post('/api/v1/devices/{device}/alarms/{event_key}/notes',status_code=201)
     async def add_note(device,event_key,body: Note,user=Depends(session)):
-        check_device(device,user,control=True)
-        if not store.doc(settings.mode,device,'alarm',event_key): raise HTTPException(404,'Alarm not found')
+        check_device(device,user,permission='alarms.handle')
         with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(settings.mode,device,'alarm',event_key)).fetchone(): raise HTTPException(404,'Alarm not found')
+            payload=json.dumps({'note':body.note,'resolution':body.resolution},sort_keys=True)
+            if body.client_request_id:
+                prior=db.execute('SELECT note_id,body FROM note_requests WHERE mode=? AND device=? AND event_key=? AND username=? AND request_id=?',(settings.mode,device,event_key,user['username'],body.client_request_id)).fetchone()
+                if prior:
+                    if prior['body']!=payload: raise HTTPException(409,'Request ID already used for different note')
+                    return envelope({'note_id':prior['note_id'],'event_key':event_key,'username':user['username'],'duplicate':True})
+            claim=db.execute('SELECT username FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key)).fetchone()
+            if claim and claim['username']!=user['username']: raise HTTPException(409,'Alarm is being handled by another member')
             cur=db.execute('INSERT INTO notes(mode,device,event_key,username,note,resolution,created) VALUES(?,?,?,?,?,?,?)',
                            (settings.mode,device,event_key,user['username'],body.note,body.resolution,time.time()))
+            if body.client_request_id: db.execute('INSERT INTO note_requests VALUES(?,?,?,?,?,?,?)',(settings.mode,device,event_key,user['username'],body.client_request_id,cur.lastrowid,payload))
+            db.execute('DELETE FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key))
         await publish(device,'alarm_note',{'event_key':event_key,'resolution':body.resolution})
         return envelope({'note_id':cur.lastrowid,'event_key':event_key,'username':user['username']})
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
     def notes(device,event_key,user=Depends(session)):
-        check_device(device,user)
+        check_device(device,user,permission='alarms.read')
         with store.connection() as db:
             rows=db.execute('SELECT id,username,note,resolution,created FROM notes WHERE mode=? AND device=? AND event_key=? ORDER BY id',
                             (settings.mode,device,event_key)).fetchall()
-        return envelope({'items':[dict(r) for r in rows]})
+            items=[dict(r) for r in rows]
+            for item in items: item['account_deleted']=bool(db.execute('SELECT 1 FROM deleted_accounts WHERE username=?',(item['username'],)).fetchone())
+        return envelope({'items':items})
 
     @app.get('/api/v1/devices/{device}/reports')
     def reports(device,user=Depends(session)):
