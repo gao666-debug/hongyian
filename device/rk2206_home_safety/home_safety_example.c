@@ -364,6 +364,10 @@ static void safety_monitor_thread(void *arg)
                 memset(&fall, 0, sizeof(fall));
             }
             if(cmd.code==SAFETY_CMD_ACK || cmd.code==SAFETY_CMD_MUTE) {mute_forced = true;living_silence();}
+            else if(cmd.code==SAFETY_CMD_SOS) {
+                help_on=true;mute_forced=false;beep_start=now;
+                printf("[cloud] SOS applied: local help alarm active\r\n");
+            }
             else command_result=living_execute(cmd.code,cmd.payload,sntp_get_epoch());
         }
         key_id_t long_key=key_take_long_event();

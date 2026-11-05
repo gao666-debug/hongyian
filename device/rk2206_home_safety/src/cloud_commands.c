@@ -48,6 +48,7 @@ void cloud_command_accept(const char *topic, const char *body, size_t length)
     if (cJSON_IsObject(j) && cJSON_IsString(service) && !strcmp(service->valuestring, IOTDA_SERVICE_ID) &&
         cJSON_IsString(name) && cJSON_IsObject(paras)) {
         if (!strcmp(name->valuestring, "ack") && !cJSON_GetArraySize(paras)) code = SAFETY_CMD_ACK;
+        if (!strcmp(name->valuestring, "sos") && !cJSON_GetArraySize(paras)) code = SAFETY_CMD_SOS;
         if (!strcmp(name->valuestring, "mute") && !cJSON_GetArraySize(paras)) code = SAFETY_CMD_MUTE;
     }
     if (cJSON_IsString(name) && cJSON_IsObject(paras)) {
@@ -59,7 +60,7 @@ void cloud_command_accept(const char *topic, const char *body, size_t length)
     }
     char payload[384];
     if (!cJSON_PrintPreallocated(paras,payload,sizeof(payload),0)) code=0;
-    if (code>=SAFETY_CMD_LIVING && (living_validate(code,payload) || !cJSON_IsString(service) || strcmp(service->valuestring,IOTDA_SERVICE_ID))) code=0;
+    if (code>=SAFETY_CMD_LIVING && code<=SAFETY_CMD_LIGHT && (living_validate(code,payload) || !cJSON_IsString(service) || strcmp(service->valuestring,IOTDA_SERVICE_ID))) code=0;
     if (code) {
         int rc = safety_command_submit_payload(code, "cloud", payload, &r->command);
         if (rc == 0) r->ready = 0;

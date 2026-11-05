@@ -75,13 +75,13 @@ export class Backend {
       return response.result as ArrayBuffer;
     } finally {client.destroy();}
   }
-  async request(path: string, method: http.RequestMethod = http.RequestMethod.GET, body: string = ''): Promise<Envelope> {
+  async request(path: string, method: http.RequestMethod = http.RequestMethod.GET, body: string = '', readTimeout: number = 45000): Promise<Envelope> {
     const certificate = this.certificatePath();
     const client = http.createHttp();
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store' };
     if (this.token !== '') { headers['Authorization'] = 'Bearer ' + this.token; }
     const options: http.HttpRequestOptions = {
-      method: method, header: headers, usingCache: false, connectTimeout: 8000, readTimeout: 45000,
+      method: method, header: headers, usingCache: false, connectTimeout: 8000, readTimeout: readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
     if (certificate !== '') { options.caPath = certificate; }

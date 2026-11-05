@@ -39,7 +39,7 @@ class Login(StrictModel):
 class Command(StrictModel):
     device_id: str
     service_id: Literal['HomeSafety'] = 'HomeSafety'
-    command_name: Literal['ack','mute','set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light']
+    command_name: Literal['ack','mute','sos','set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light']
     paras: dict = Field(default_factory=dict)
     client_request_id: str = Field(min_length=1,max_length=128)
 
@@ -49,6 +49,7 @@ class Note(StrictModel):
 
 class AppSOS(StrictModel):
     client_request_id: str = Field(min_length=1,max_length=128)
+    activate_device: bool = False  # Legacy clients keep event-only semantics.
 
 class BatchNotes(Note):
     event_keys: list[str] = Field(min_length=1,max_length=100)
@@ -188,11 +189,15 @@ def create_app(settings=None, cloud=None):
                     props['help']=props['fall']=0
                     props['status']=3 if props.get('gas_alarm') else 4 if props.get('inactive',0)>60 else 5 if props.get('status')==5 else 0
                     props['alarm']=int(props['status']!=0)
+                if name=='sos':
+                    props['help']=props['alarm']=1
+                    props['status']=1
                 shadow['updated_at']=utc()
                 store.put('mock',row['device'],'shadow',shadow)
                 health = store.doc('mock',row['device'],'health') or {'schema':1,'fw':'mock','boot_id':0,'epoch':0,'up':0,
                     'env_valid':1,'imu_valid':0,'door_enabled':0,'wireless_btn_enabled':0,'mute':0,'tls':False}
                 if name in ('ack','mute'): health['mute']=1
+                if name=='sos': health['mute']=0
                 result=0
                 if name in ('set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light'):
                     params=json.loads(row['body'])['paras']
@@ -223,7 +228,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.8.1',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.8.2',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -243,7 +248,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.8.1','camera_transport':'jpeg-relay'})
+                         'api_version':'1.8.2','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
     from .camera import CameraService
@@ -437,8 +442,8 @@ def create_app(settings=None, cloud=None):
     async def commands(body: Command,user=Depends(session)):
         check_device(body.device_id,user,control=True)
         if body.device_id != settings.primary_device: raise HTTPException(422,"This device does not support gateway commands")
-        if body.command_name in ('ack','mute') and body.paras:
-            raise HTTPException(422,'ack/mute require paras:{}')
+        if body.command_name in ('ack','mute','sos') and body.paras:
+            raise HTTPException(422,'ack/mute/sos require paras:{}')
         try:
             if body.command_name == 'set_light': LightControl.model_validate(body.paras)
             if body.command_name == 'set_living': LivingConfig.model_validate(body.paras)
@@ -692,6 +697,8 @@ def create_app(settings=None, cloud=None):
     @app.post('/api/v1/devices/{device}/sos',status_code=201)
     async def app_sos(device,body: AppSOS,user=Depends(session)):
         check_device(device,user,control=True)
+        if body.activate_device and device != settings.primary_device:
+            raise HTTPException(422,'Only the home gateway supports audible SOS')
         # Stable across retries and isolated from physical boot/event identifiers.
         event_id=int(hashlib.sha256((user['username']+':'+body.client_request_id).encode()).hexdigest()[:12],16)
         key=f"2147483647:{event_id}"
@@ -705,7 +712,17 @@ def create_app(settings=None, cloud=None):
                 'source':'app','requested_by':user['username']}
             if created: store.put(settings.mode,device,'alarm',data,key,db)
         if created: await publish(device,'alarm',data)
-        return envelope(data)
+        result=dict(data)
+        if body.activate_device:
+            # A retry after event persistence must create/reuse the same command, never a second SOS.
+            command_key='app-sos-'+hashlib.sha256(body.client_request_id.encode()).hexdigest()
+            payload={'service_id':'HomeSafety','command_name':'sos','paras':{}}
+            row,new=store.new_command(settings.mode,device,user['username'],command_key,payload)
+            if new:
+                task=asyncio.create_task(run_command(row))
+                tasks.add(task);task.add_done_callback(tasks.discard)
+            result['device_command']=command_data(row)
+        return envelope(result)
 
     @app.post('/api/v1/devices/{device}/alarms/batch-notes')
     async def batch_notes(device,body: BatchNotes,user=Depends(session)):
