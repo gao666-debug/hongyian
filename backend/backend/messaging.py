@@ -113,6 +113,19 @@ class Messaging:
     def _db(self):
         return self.store.connection()
 
+    def delete_account_relations(self, db, username):
+        """Use the account deletion transaction; preserve historical messages."""
+        groups = db.execute("SELECT id FROM conversations WHERE kind='group' AND owner=?", (username,)).fetchall()
+        for group in groups:
+            successor = db.execute('SELECT m.username FROM conversation_members m JOIN users u ON u.name=m.username '
+                                   'WHERE m.conversation_id=? AND m.username<>? ORDER BY m.joined,m.username LIMIT 1',
+                                   (group['id'], username)).fetchone()
+            if successor:
+                db.execute('UPDATE conversations SET owner=? WHERE id=?', (successor['username'], group['id']))
+        db.execute('DELETE FROM contacts WHERE owner=? OR peer=?', (username, username))
+        db.execute('DELETE FROM conversation_members WHERE username=?', (username,))
+        db.execute("DELETE FROM documents WHERE kind='invite_code' AND device=?", (username,))
+
     def user_exists(self, username):
         with self._db() as db:
             return db.execute('SELECT 1 FROM users WHERE name=?', (username,)).fetchone() is not None

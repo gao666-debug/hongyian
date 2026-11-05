@@ -29,6 +29,10 @@ class Store:
                 UNIQUE(mode,device,username,client_id));
             CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT,mode TEXT,device TEXT,event_key TEXT,
                 username TEXT,note TEXT,resolution TEXT,created REAL);
+            CREATE TABLE IF NOT EXISTS alarm_claims(mode TEXT,device TEXT,event_key TEXT,username TEXT,created REAL,
+                PRIMARY KEY(mode,device,event_key));
+            CREATE TABLE IF NOT EXISTS note_requests(mode TEXT,device TEXT,event_key TEXT,username TEXT,request_id TEXT,note_id INTEGER,body TEXT,
+                PRIMARY KEY(mode,device,event_key,username,request_id));
             CREATE INDEX IF NOT EXISTS doc_order ON documents(mode,device,kind,updated);
             ''')
             # A restart cannot prove the outcome of an interrupted cloud operation.
