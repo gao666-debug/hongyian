@@ -180,8 +180,8 @@ struct Nodes {
       Column() {
         this.information({label:'人体活动',value:motionText(this.environment.body)})
         this.information({label:'房门状态',value:roomDoorText(this.environment.door)})
-        if (this.environment.temp !== null && this.environment.temp !== undefined) { this.information({label:'温度',value:sensorText(this.environment.temp,' °C',1)}) }
-        if (this.environment.humi !== null && this.environment.humi !== undefined) { this.information({label:'湿度',value:sensorText(this.environment.humi,' %',1)}) }
+        this.information({label:'温度',value:this.environment.temp !== null && this.environment.temp !== undefined ? sensorText(this.environment.temp,' °C',1) : '未上报 · 待固件支持'})
+        this.information({label:'湿度',value:this.environment.humi !== null && this.environment.humi !== undefined ? sensorText(this.environment.humi,' %',1) : '未上报 · 待固件支持'})
         this.information({label:'云端登记状态',value:this.environmentOnline === true ? '在线' : this.environmentOnline === false ? '离线（以采集时间辅助核实）' : '待确认'})
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(16)
       if (this.environmentError) { Text(this.environmentError).fontSize(13).fontColor(CareTheme.warmInk).width('100%') }
@@ -205,7 +205,7 @@ struct Nodes {
     }.width('100%')
     if (this.watchError) { Text(this.watchError).fontSize(13).fontColor(CareTheme.warmInk).width('100%') }
     Column() {
-      this.information({label:'电量',value:this.watch&&this.watch.battery_percent!==null&&this.watch.battery_percent!==undefined?sensorText(this.watch.battery_percent,'%'):'未采集'})
+      this.information({label:'电量',value:this.watch&&this.watch.battery_percent!==null&&this.watch.battery_percent!==undefined?sensorText(this.watch.battery_percent,'%'):'未采集 · 不显示估算电量'})
       this.information({label:'跌倒监测',value:this.fallText()})
       this.information({label:'累计判定次数',value:this.watch ? sensorText(this.watch.fall_count,' 次') : '待上报'})
       this.information({label:'活动强度',value:this.watch ? sensorText(this.watch.dynamic_mg,' mg') : '待上报'})

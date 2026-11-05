@@ -18,5 +18,7 @@ vm.runInNewContext('(function(require,module,exports){'+compiled+'})',{})(name=>
  body={firmware:'camera-v0.2',camera_ready:false};await assert.rejects(()=>c.probe('10.46.76.1','user','test'),/排线/);
  body={firmware:'camera-v0.2',camera_ready:true};assert.equal((await c.find('http://10.46.76.1','user','test',()=>{})).address,'http://10.46.76.1');
  const cancelled=c.find('http://10.46.76.1','user','test',()=>{});c.cancel();await assert.rejects(()=>cancelled,/取消/);
- assert(closed>=8);console.log('PASS camera: URL bounds, identity, authentication, readiness, discovery, cancellation, request cleanup');
+ assert(closed>=8);
+ const fast=new Camera();fast.probe=address=>address==='http://10.1.2.3'?Promise.resolve({address,report:{camera_ready:true}}):new Promise(()=>{});
+ const quick=await Promise.race([fast.find('http://10.1.2.3','user','test',()=>{}),new Promise((_,reject)=>setTimeout(()=>reject(Error('saved camera blocked by unrelated probes')),100))]);assert.equal(quick.address,'http://10.1.2.3');console.log('PASS camera: URL bounds, identity, authentication, readiness, discovery, cancellation, request cleanup');
 })().catch(e=>{console.error(e);process.exitCode=1});

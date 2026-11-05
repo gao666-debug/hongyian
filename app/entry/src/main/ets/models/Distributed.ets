@@ -20,7 +20,8 @@ export interface DistributedNode {
   properties?: EnvironmentProperties | null; watch?: WearReading | null;
   updated_at?: string | null; online?: boolean | null;
 }
-export interface DistributedFamily { devices: DistributedNode[]; name?: string; role?: string; }
+export interface HouseholdMember { username: string; role: string; }
+export interface DistributedFamily { devices: DistributedNode[]; name?: string; role?: string; permissions?: string[]; members?: HouseholdMember[]; }
 
 export function gatewayId(nodes: DistributedNode[]): string {
   const gateways = nodes.filter((node: DistributedNode) => node.kind === 'gateway');

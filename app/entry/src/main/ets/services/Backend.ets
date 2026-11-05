@@ -1,16 +1,18 @@
 import { http, webSocket } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
-import { Envelope, LoginData, Push, Ticket } from '../models/Models';
+import { Envelope, LoginData, Push, Ticket, backendErrorMessage } from '../models/Models';
 import { DistributedFamily, DistributedNode, gatewayId } from '../models/Distributed';
 
 export class Backend {
   base: string = '';
   device: string = 'demo-device';
   token: string = '';
+  username: string = '';
   deviceIds: string[] = [];
   family: DistributedFamily = { devices: [] };
   caPath: string = '';
+  tokenExpiresAt: number = 0;
   private publicCaPath: string = '';
   private socket: webSocket.WebSocket | null = null;
   private timer: number = -1;
@@ -76,6 +78,7 @@ export class Backend {
     } finally {client.destroy();}
   }
   async request(path: string, method: http.RequestMethod = http.RequestMethod.GET, body: string = '', readTimeout: number = 45000): Promise<Envelope> {
+    const requestToken=this.token;
     const certificate = this.certificatePath();
     const client = http.createHttp();
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store' };
@@ -90,9 +93,12 @@ export class Backend {
       const url = this.base + path + (path.includes('?') ? '&' : '?') + '_ts=' + Date.now();
       const response = await client.request(url, options);
       const envelope = JSON.parse(response.result as string) as Envelope;
-      if (response.responseCode === 401) { throw new Error('登录已过期，请重新登录'); }
+      if (response.responseCode === 401) {
+        if(requestToken&&this.token===requestToken){this.stopPush();this.token='';this.tokenExpiresAt=0;this.family={devices:[]};this.deviceIds=[];}
+        throw new Error('登录已过期或权限已调整，请重新登录');
+      }
       if (response.responseCode >= 400 || envelope.code !== 0) {
-        throw new Error(envelope.message || `请求失败 ${response.responseCode}`);
+        throw new Error(backendErrorMessage(response.responseCode, envelope));
       }
       return envelope;
     } finally { client.destroy(); }
@@ -100,21 +106,35 @@ export class Backend {
   async login(base: string, username: string, password: string): Promise<void> {
     const clean = base.trim().replace(/\/+$/, '');
     if (!clean.startsWith('https://')) { throw new Error('后端地址需要使用 HTTPS'); }
-    this.stopPush(); this.base = clean; this.token = ''; this.deviceIds = []; this.family={devices:[]};
+    this.stopPush(); this.base = clean; this.token = ''; this.deviceIds = []; this.family={devices:[]}; this.tokenExpiresAt = 0;
     const response = await this.request('/api/v1/auth/login', http.RequestMethod.POST, JSON.stringify({ username: username, password: password }));
     const login = response.data as LoginData;
+    this.username = login.username || username;
     this.token = login.access_token;
     if (!this.token) { throw new Error('登录响应缺少令牌'); }
+    // Keep the server-issued lifetime so a saved account can be reused until it really expires.
+    const seconds = typeof login.expires_in === 'number' && login.expires_in > 0 ? login.expires_in : 28800;
+    this.tokenExpiresAt = Date.now() + seconds * 1000;
     this.deviceIds = login.device_ids || [];
     try {
       if (login.devices && login.devices.length) { this.applyFamily({devices:login.devices}); }
       else { await this.refreshHousehold(); }
-    } catch (error) { this.token='';this.deviceIds=[];this.family={devices:[]};throw new Error((error as Error).message || '无法识别家庭主机'); }
+    } catch (error) { this.token='';this.deviceIds=[];this.family={devices:[]};this.tokenExpiresAt=0;throw new Error((error as Error).message || '无法识别家庭主机'); }
+  }
+  // Resume a previously saved session without asking for the password again.
+  async adopt(base: string, token: string, expiresAt: number): Promise<void> {
+    const clean = base.trim().replace(/\/+$/, '');
+    if (!clean.startsWith('https://')) { throw new Error('后端地址需要使用 HTTPS'); }
+    if (!token || expiresAt <= Date.now()) { throw new Error('该账号的登录已过期'); }
+    this.stopPush();
+    this.base = clean; this.token = token; this.deviceIds = []; this.family = { devices: [] }; this.tokenExpiresAt = expiresAt;
+    try { await this.refreshHousehold(); }
+    catch (error) { this.token='';this.deviceIds=[];this.family={devices:[]};this.tokenExpiresAt=0;throw new Error('该账号的登录已过期，请重新输入密码'); }
   }
   async logout(): Promise<void> {
     this.stopPush();
     try { if (this.token) { await this.request('/api/v1/auth/logout', http.RequestMethod.POST, '{}'); } }
-    finally { this.token = ''; this.deviceIds = []; this.family={devices:[]}; }
+    finally { this.token = ''; this.username = ''; this.deviceIds = []; this.family={devices:[]}; this.tokenExpiresAt = 0; }
   }
   stopPush(): void {
     this.generation++;

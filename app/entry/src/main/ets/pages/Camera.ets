@@ -117,11 +117,14 @@ struct HomeCameraPage {
     });}catch(error){if(generation===this.generation){this.failed=true;this.message='流畅连接失败，可切换省流模式';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);}}
   }
   private changeMode():void{if(this.recording){return;}this.smooth=!this.smooth;if(this.source){this.connect(true);}}
+  private async saveRemote(value:boolean):Promise<void>{
+    try{const pref=await preferences.getPreferences(getContext(this),{name:'yihongan-camera'});await pref.put('remote',value);await pref.flush();}catch(error){}
+  }
   private async changeAccess(remote:boolean):Promise<void>{
     if(this.remote===remote||this.recording){return;}
     this.stop();this.remote=remote;
-    try{const pref=await preferences.getPreferences(getContext(this),{name:'yihongan-camera'});await pref.put('remote',remote);await pref.flush();}catch(error){}
-    this.connect();
+    this.saveRemote(remote);
+    this.connect(false,true);
   }
 
   aboutToAppear(): void { this.visible=true;this.restore().then(()=>{if(this.visible){this.connect();}}); }
@@ -173,7 +176,7 @@ struct HomeCameraPage {
     this.message='已停止观看';
     this.releaseStream().finally(()=>{if(generation===this.generation){this.source='';}});
   }
-  private async connect(manual:boolean=false): Promise<void> {
+  private async connect(manual:boolean=false, explicit:boolean=false): Promise<void> {
     if(!DeviceSession.backend.token){this.failed=true;this.message='请先登录家庭账号，再访问摄像头';return;}
     if (this.busy) { return; }
     const generation=++this.generation;
@@ -183,12 +186,31 @@ struct HomeCameraPage {
     this.source='';
     this.message='正在查找摄像头…';
     try {
+      if(!manual&&!explicit){
+        // Pick the transport the server can actually serve before touching the network.
+        let bound=false;
+        try {
+          const api=DeviceSession.backend;
+          const response=await api.request(api.path('camera'));
+          if(generation!==this.generation){return;}
+          const status=response.data as RemoteCameraStatus;
+          bound=!!status.configured;
+          if(bound){this.remote=true;}
+          else if(this.remote){
+            this.remote=false;
+            this.message='远程观看尚未绑定，已自动改用同一网络直连';
+            this.saveRemote(false);
+          }
+        } catch(error) { /* Keep the locally remembered choice when status is unavailable. */ }
+        if(generation!==this.generation){return;}
+        if(!bound){this.source='';}
+      }
       if(this.remote){
         const api=DeviceSession.backend;
         const response=await api.request(api.path('camera'));
         if(generation!==this.generation){return;}
         const status=response.data as RemoteCameraStatus;
-        if(!status.configured){throw new Error('摄像头尚未绑定，请管理员完成一次性配置');}
+        if(!status.configured){throw new Error('远程观看尚未绑定：需要管理员完成一次摄像头上传配置');}
         await this.viewing.start(api,(message:string)=>{if(generation===this.generation){this.failed=true;this.message=message;}});
         if(generation!==this.generation){return;}
         this.source=api.base;this.settingsOpen=false;
@@ -242,7 +264,7 @@ struct HomeCameraPage {
           Blank()
           Image($r('app.media.camera')).width(60).height(60)
           Text(this.busy?'正在寻找家中摄像头':'画面，由你开启').fontSize(20).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink)
-          Text(this.remote?'摄像头通电联网后，登录家庭账号即可远程查看。首次需管理员配置上传。':'摄像头与手机连接同一热点后自动查找，可在连接设置中保存地址。').fontSize(14).fontColor(CareTheme.secondary).textAlign(TextAlign.Center).lineHeight(23).padding({left:20,right:20})
+          Text(this.remote?'摄像头通电联网后，登录家庭账号即可远程查看。':'首次只需一次配对：手机连到与摄像头相同的热点（GB），点下方按钮自动找到并记住地址；以后再打开直接出画面。').fontSize(14).fontColor(CareTheme.secondary).textAlign(TextAlign.Center).lineHeight(23).padding({left:20,right:20})
           Blank()
         }.layoutWeight(1).width('100%').backgroundColor(CareTheme.softBlue).borderRadius(16)
       }
@@ -270,7 +292,7 @@ struct HomeCameraPage {
           Button('使用此地址连接').enabled(!this.busy).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{this.connect(true);})
         }.width('100%')
       }
-      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':'同一局域网直连 · 退出页面停止加载').fontSize(13).fontColor(CareTheme.secondary).margin({bottom:8})
+      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':(this.address?'已记住摄像头地址 · 打开即连，无需再次配置':'同一热点自动查找 · 配对成功后会记住地址')).fontSize(13).fontColor(CareTheme.secondary).margin({bottom:8})
     }.padding({left:20,right:20,top:12,bottom:18}).width('100%').height('100%').backgroundColor(CareTheme.background)
   }
 }

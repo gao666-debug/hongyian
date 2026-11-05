@@ -1,14 +1,21 @@
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { bundleManager } from '@kit.AbilityKit';
+import { abilityAccessCtrl } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
 import { promptAction } from '@kit.ArkUI';
 import { CareTheme } from '../theme/CareTheme';
+import { roleAllows, roleLabel, roleNote, collaborationError } from '../models/Permissions';
 import { AlarmNotifications, NotificationRoute } from '../services/AlarmNotifications';
 import { Backend } from '../services/Backend';
-import { watchVital, heartText, DistributedNode, DistributedFamily, readingFresh, sensorText, motionText, roomDoorText } from '../models/Distributed';
+import { watchVital, heartText, DistributedNode, DistributedFamily, HouseholdMember, readingFresh, sensorText, motionText, roomDoorText } from '../models/Distributed';
 import { DeviceSession } from '../services/DeviceSession';
-import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate } from '../models/Living';
+import { Accounts, SavedAccount } from '../services/Accounts';
+import { Voice } from '../services/Voice';
+import { VoiceCommand, VoiceIntent } from '../services/VoiceCommand';
+import { VoiceListen } from '../services/VoiceListen';
+import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate, livingCommandMatches } from '../models/Living';
 import { AlarmSnapshot, alarmStateLabel, alarmIsActive, noteText, resolutionLabel } from '../models/AlarmState';
 import { doorLabel } from '../models/DoorState';
 import { AlarmInbox, mergeAlarms } from '../models/AlarmInbox';
@@ -39,19 +46,109 @@ interface InfoView { label: string; value: string; color: string; }
 struct Index {
   @State familyNodes: DistributedNode[] = [];
   @State familyRole: string = '';
+  @State members: HouseholdMember[] = [];
   @State memberName: string = '';
   @State memberPassword: string = '';
-  @State memberReadOnly: boolean = true;
+  @State memberRole: string = 'viewer';
   @State memberBusy: boolean = false;
   @State memberMessage: string = '';
+  @State memberCreated: string = '';
+  private readonly memberRoles: string[] = ['viewer','caregiver','community','property'];
+  @State claimBusy: boolean = false;
+  private noteRequest: string = '';
+  private noteRequestBody: string = '';
+  private allowed(action:string): boolean { return this.demo || roleAllows(this.familyRole,action); }
+  private expiredSession(generation:number): void {
+    if(generation!==this.generation||this.api.token||!this.loggedIn){return;}
+    this.generation++;this.loggedIn=false;this.demo=false;this.simulated=false;this.online=false;this.pushOnline=false;
+    this.polling=false;this.detailsPolling=false;this.healthPolling=false;this.familyPolling=false;this.loading=false;
+    this.familyNodes=[];this.members=[];this.familyRole='';this.alarms=[];this.alertQueue=[];this.notes=[];this.selected=null;
+    this.living=null;this.livingOpen=false;this.medicineNotice=false;this.hours=[];this.days=[];this.activityReport=null;
+    this.temp=-999;this.humi=-999;this.gas=-999;this.light=-999;this.body=-1;this.inactive=-1;this.status=-1;
+    this.received=0;this.deviceTime=0;this.healthKnown=false;this.sessionPassword='';this.api.stopPush();Voice.stop();
+    this.error='登录已失效或权限已调整，请重新登录';this.passwordDraft='';this.settingsOpen=true;
+  }
+  @State accounts: SavedAccount[] = [];
+  @State appVersion: string = '';
+  @State switchBusy: boolean = false;
+  @State switchMessage: string = '';
+  @State switchUser: string = '';
+  @State switchPassword: string = '';
+  @State switchServer: string = '';
   private async addMember(): Promise<void> {
-    if (this.memberBusy) { return; }
-    this.memberBusy=true;
+    if (this.memberBusy || !this.allowed('members.manage')) { return; }
+    this.memberName=this.memberName.trim();
+    if(!/^[A-Za-z0-9_-]{3,32}$/.test(this.memberName)){this.memberMessage='账号需为3～32位字母、数字、下划线或短横线';return;}
+    if(this.memberPassword.length<8||this.memberPassword.length>128){this.memberMessage='家庭成员密码需为8～128位，你当前输入了'+this.memberPassword.length+'位';return;}
+    this.memberBusy=true;this.memberMessage='';
+    const created=this.memberName;
     try {
-      await this.api.request('/api/v1/household/members',http.RequestMethod.POST,JSON.stringify({username:this.memberName,password:this.memberPassword,role:this.memberReadOnly?'viewer':'caregiver'}));
-      this.memberPassword='';this.memberMessage='成员已创建，可在另一台手机使用该账号登录';
+      await this.api.request('/api/v1/household/members',http.RequestMethod.POST,JSON.stringify({username:created,password:this.memberPassword,role:this.memberRole}));
+      this.memberCreated=created;
+      this.memberName='';this.memberPassword='';
+      this.memberMessage='已创建「'+created+'」';
+      await this.refreshFamily();
     } catch (error) { this.memberMessage=(error as Error).message; }
     finally { this.memberBusy=false; }
+  }
+
+  private memberRoleLabel(role:string): string {
+    return roleLabel(role);
+  }
+  private memberRoleNote(role:string): string {
+    return roleNote(role);
+  }
+  private async manageMember(member:HouseholdMember, remove:boolean): Promise<void> {
+    if(this.memberBusy || this.familyRole!=='owner' || member.role==='owner'){return;}
+    const generation=this.generation;
+    let role=member.role;
+    try {
+      if(remove){
+        const answer=await promptAction.showDialog({title:'删除成员账号',message:'确认删除「'+member.username+'」？该账号将无法登录，所有登录状态失效；以前的处置记录会保留。此操作不可撤销。',buttons:[{text:'取消',color:SUB},{text:'删除账号',color:RED}]});
+        if(answer.index!==1){return;}
+      }else{
+        const answer=await promptAction.showActionMenu({title:'设置 '+member.username+' 的权限',buttons:[{text:'只读成员',color:PRIMARY},{text:'家属／监护人',color:PRIMARY},{text:'社区网格员',color:PRIMARY},{text:'物业值班人员',color:PRIMARY}]});
+        role=this.memberRoles[answer.index];if(!role||role===member.role){return;}
+      }
+      if(generation!==this.generation){return;}
+      this.memberBusy=true;
+      await this.api.request('/api/v1/household/members/'+encodeURIComponent(member.username),remove?http.RequestMethod.DELETE:http.RequestMethod.PATCH,remove?'':JSON.stringify({role:role}));
+      if(generation!==this.generation){return;}
+      this.accounts=await Accounts.remove(getContext(this) as common.UIAbilityContext,this.api.base,member.username);
+      this.memberMessage=remove?'已删除账号「'+member.username+'」，历史记录保留':'权限已更新，该成员需要重新登录';
+      await this.refreshFamily();
+    }catch(error){if(generation===this.generation){this.memberMessage='操作未完成：'+(error as Error).message;}}
+    finally{this.memberBusy=false;}
+  }
+  // A member row doubles as the switch entry: the same person never appears twice.
+  private accountOf(username:string): SavedAccount | null {
+    const base=this.api.base;
+    for(const item of this.accounts){
+      if(item.username===username&&item.server===base){return item;}
+    }
+    return null;
+  }
+  // 切换到其他成员始终要求该账号密码，不复用其他账号会话。
+  private async switchMember(username:string): Promise<void> {
+    this.switchMessage='';
+    this.switchUser=username;
+    this.switchServer=this.api.base;
+    this.switchPassword='';
+  }
+  private localExtras(): SavedAccount[] {
+    const base=this.api.base;
+    return this.accounts.filter((item:SavedAccount):boolean=>
+      item.server===base&&!this.members.some((member:HouseholdMember):boolean=>member.username===item.username));
+  }
+  private accountStatusText(): string {
+    const parts:string[]=[];
+    parts.push(this.pushOnline?'云端已连接':'前台轮询');
+    parts.push(this.familyNodes.length+' 台设备');
+    if(this.received>0){
+      const age=Math.max(0,Math.floor((Date.now()-this.received)/1000));
+      parts.push(age<60?age+' 秒前同步':Math.floor(age/60)+' 分钟前同步');
+    }
+    return parts.join(' · ');
   }
 
   @State familyMessage: string = '登录后查看家庭设备';
@@ -64,9 +161,10 @@ struct Index {
       if (generation !== this.generation || !this.loggedIn) { return; }
       this.familyNodes = family.devices || [];
       this.familyRole = family.role || '';
+      this.members = family.members || [];
       this.familyMessage = this.familyNodes.length ? '同一家庭，分布守护' : '暂未绑定设备';
     } catch (error) {
-      if (generation === this.generation) { this.familyMessage = '房间与随身设备可从下方入口查看'; }
+      if (generation === this.generation) { this.familyMessage = '房间与随身设备可从下方入口查看';this.expiredSession(generation); }
     } finally { if (generation === this.generation) { this.familyPolling = false; } }
   }
 
@@ -100,6 +198,14 @@ struct Index {
   @State elderModeSaving: boolean = false;
   @State elderModeMessage: string = '';
   @State alarmReminders: boolean = true;
+  @State voiceOn: boolean = true;
+  @State voiceMessage: string = '';
+  @State voiceStatus: string = '点一下麦克风，说“小颐开灯”';
+  @State voiceHeard: string = '';
+  @State voiceReply: string = '';
+  @State voiceTyped: string = '';
+  @State voiceBusy: boolean = false;
+  @State voiceTick: string = '';
   @State alertQueue: AlarmEvent[] = [];
   @State demo: boolean = true;
   @State loggedIn: boolean = false;
@@ -141,7 +247,7 @@ struct Index {
   @State alarmTotal: number = 0;
   @State chartDay: number = 0;
   @State settingsOpen: boolean = false;
-  @State serverDraft: string = 'https://backend.example.com:8443';
+  @State serverDraft: string = 'https://backend.example.com';
   @State userDraft: string = 'guardian';
   @State passwordDraft: string = '';
   @State loginBusy: boolean = false;
@@ -176,9 +282,15 @@ struct Index {
   private noteOperation: number = 0;
   private demoNotes: Map<string, NoteItem[]> = new Map<string, NoteItem[]>();
 
-  aboutToAppear(): void { this.initialize(); }
+  aboutToAppear(): void { this.readVersion(); this.initialize(); }
+  // Read the installed version so the about row can never drift from app.json5 again.
+  private readVersion(): void {
+    try {
+      this.appVersion = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).versionName;
+    } catch (error) { this.appVersion = ''; }
+  }
   onPageShow(): void { this.visible = true; this.startTimer(); if (this.loggedIn && !this.demo) { this.refresh(true); this.startPush(); } }
-  onPageHide(): void { this.visible = false; this.stopTimer(); this.api.stopPush(); this.generation++; this.polling = false; this.detailsPolling = false; this.healthPolling = false; this.familyPolling = false; this.loading = false; }
+  onPageHide(): void { this.visible = false; this.stopTimer(); Voice.stop(); this.api.stopPush(); this.generation++; this.polling = false; this.detailsPolling = false; this.healthPolling = false; this.familyPolling = false; this.loading = false; }
   aboutToDisappear(): void { this.onPageHide(); }
   private async initialize(): Promise<void> {
     this.loadDemo();
@@ -189,10 +301,34 @@ struct Index {
       this.serverDraft = await store.get('server', this.serverDraft) as string;
       this.userDraft = await store.get('username', 'guardian') as string;
       this.elderMode = await store.get('elder_mode', false) as boolean;
+      this.voiceOn = await store.get('voice_announce', true) as boolean;
+      Voice.setEnabled(this.voiceOn);
     } catch (_) { /* Settings are optional; never persist passwords. */ }
+    this.accounts = await Accounts.load(context);
     await this.loadProfile();
     this.notificationsEnabled=await AlarmNotifications.inspect();
     this.startTimer();
+    // Resume the last account silently so switching between accounts survives an app restart.
+    this.restoreLastAccount();
+  }
+  private async restoreLastAccount(): Promise<void> {
+    const usable = this.accounts.filter((item:SavedAccount):boolean=>item.username===this.userDraft&&item.server===this.serverDraft&&Accounts.usable(item,Date.now()))
+      .sort((a:SavedAccount,b:SavedAccount):number=>b.lastUsed-a.lastUsed);
+    if(!usable.length){return;}
+    const entry=usable[0];
+    try{
+      await this.api.adopt(entry.server,entry.token,entry.expiresAt);
+      if(this.loggedIn){return;}
+      this.applySessionState(entry.username,'');
+      this.serverDraft=entry.server;this.userDraft=entry.username;
+      await this.persistSettings();
+      await this.refreshFamily();
+      await this.refresh(true);this.startPush();
+    }catch(error){
+      // Expired or revoked while the app was closed; stay in demo and let the user pick again.
+      const dropped:SavedAccount={server:entry.server,username:entry.username,role:entry.role,token:'',expiresAt:0,devices:entry.devices,lastUsed:entry.lastUsed};
+      this.accounts=await Accounts.save(getContext(this) as common.UIAbilityContext,dropped);
+    }
   }
   private startTimer(): void {
     if (this.timer !== -1 || !this.visible) { return; }
@@ -207,7 +343,7 @@ struct Index {
       }
       if (this.demo) {
         if (this.ticks % 5 === 0) { this.temp = 26.4 + Math.sin(this.ticks / 12) * 0.4; this.humi = 53 + Math.sin(this.ticks / 15) * 2; this.received = this.now; this.deviceTime = this.now; }
-      } else if (this.loggedIn && this.ticks % 2 === 0) { this.refresh(this.ticks % 16 === 0); if (this.ticks % 4 === 0) { this.refreshFamily(); } }
+      } else if (this.loggedIn && this.ticks % 2 === 0) { this.refresh(this.ticks % 16 === 0); if (this.ticks % 4 === 0 && this.detail !== 'members') { this.refreshFamily(); } }
     }, 1000);
   }
   private stopTimer(): void { if (this.timer !== -1) { clearInterval(this.timer); this.timer = -1; } }
@@ -273,6 +409,11 @@ struct Index {
     if (this.demo) { this.received = Date.now(); return; }
     if (!this.loggedIn || !this.visible) { return; }
     const generation = this.generation;
+    if(!this.allowed('view')){
+      if(!this.familyRole){await this.refreshFamily();}
+      if(generation===this.generation){await this.refreshEvents(generation);}
+      return;
+    }
     // Auxiliary requests must never hold the live-reading lane.
     this.refreshDeviceHealth(generation);
     if (full) { this.refreshDetails(generation); }
@@ -290,7 +431,7 @@ struct Index {
       this.received = Date.now(); this.refreshCount++; this.error = '';
       this.pruneAlerts();
     } catch (error) {
-      if (generation === this.generation) { this.error = '读数同步失败，请检查网络与服务：' + (error as Error).message; }
+      if (generation === this.generation) { this.error = '读数同步失败，请检查网络与服务：' + (error as Error).message;this.expiredSession(generation); }
     } finally {
       if (generation === this.generation) { this.polling = false; this.loading = false; }
     }
@@ -331,7 +472,7 @@ struct Index {
     try {
       const reply = await this.api.request(this.api.path('alarms'));
       if (generation === this.generation && this.visible) { this.receiveAlarms((reply.data as AlarmList).items || []); }
-    } catch (_) { /* Keep received events during a temporary read failure. */ }
+    } catch (error) { if(generation===this.generation){this.error='报警同步失败：'+(error as Error).message;this.expiredSession(generation);} }
   }
   private async refreshStats(generation: number): Promise<void> {
     try {
@@ -364,7 +505,8 @@ struct Index {
       if (!this.visible || this.demo) { return; }
       if (message.type === 'alarm' && message.data) { this.receiveAlarms([message.data as AlarmEvent]); }
       if (message.type === 'health' && message.data) { this.applyHealth(message.data as Health); }
-      if (message.type === 'alarm_note' || message.type === 'alarm' || message.type === 'stats' || message.type === 'resync_required' || message.type === 'command_ack') { this.refresh(true); }
+      if (message.type === 'alarm_note' && this.selected) { this.refreshSelectedNotes(); }
+      if (message.type === 'alarm_note' || message.type === 'alarm_claim' || message.type === 'alarm' || message.type === 'stats' || message.type === 'resync_required' || message.type === 'command_ack') { this.refresh(true); }
     }, (online: boolean) => { this.pushOnline = online; });
   }
   private navigate(index: number): void {
@@ -386,7 +528,18 @@ struct Index {
       this.alertQueue = this.alertQueue.concat(fresh);
       if(!this.demo){fresh.forEach((item:AlarmEvent)=>{AlarmNotifications.publish(this.api.device,item);});}
     }
+    if (fresh.length && this.visible) { this.announceAlarms(fresh); }
     this.pruneAlerts();
+  }
+  // 语音播报只念最新一条：老人听到一句明确的提示就够了，连播反而听不清。
+  private announceAlarms(items: AlarmEvent[]): void {
+    if (!this.voiceOn || !items.length) { return; }
+    const first = items[0];
+    const help = items.some((item: AlarmEvent): boolean => item.code === 1);
+    const fall = items.some((item: AlarmEvent): boolean => item.code === 2);
+    if (help) { Voice.speak('紧急提醒，收到求助信号，请立即查看', true); return; }
+    if (fall) { Voice.speak('紧急提醒，疑似跌倒，请立即查看', true); return; }
+    Voice.speak('收到' + alarmTitle(first.code) + '提醒，请在手机上查看');
   }
   private alarmSnapshot(): AlarmSnapshot {
     return { fresh: this.demo || this.online && !this.stale(), reportTime: this.deviceTime,
@@ -397,7 +550,8 @@ struct Index {
     return alarmIsActive(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
   }
   private eventLabel(item: AlarmEvent): string {
-    return alarmStateLabel(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
+    const label=alarmStateLabel(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
+    return item.claim?label+' · '+item.claim.username+' 正在处理':label;
   }
   private pruneAlerts(): void {
     this.alertQueue=this.alertQueue.filter((item: AlarmEvent)=>{
@@ -493,6 +647,114 @@ struct Index {
       await store.put(this.profilePrefix() + ':reminders', enabled); await store.flush();
     } catch (_) { this.error = '提醒偏好未保存，下次启动请重新确认'; }
   }
+  private openVoice(): void {
+    this.detail = 'voice';
+    this.voiceStatus = '点一下“开始说话”，然后说“小颐开灯”';
+    this.voiceHeard = ''; this.voiceReply = ''; this.voiceTyped = '';
+    setTimeout(()=>{this.pageScroller.scrollTo({ xOffset: 0, yOffset: 0 });},60);
+  }
+  private async ensureMic(): Promise<boolean> {
+    try {
+      const manager = abilityAccessCtrl.createAtManager();
+      const result = await manager.requestPermissionsFromUser(getContext(this), ['ohos.permission.MICROPHONE']);
+      return result.authResults.length > 0 && result.authResults[0] === 0;
+    } catch (error) { return false; }
+  }
+  private async listenVoice(): Promise<void> {
+    if (this.voiceBusy) { VoiceListen.stop(); this.voiceStatus = '已停止收音，正在识别…'; return; }
+    const mic = await this.ensureMic();
+    if (!mic) {
+      this.voiceStatus = '没有拿到麦克风权限，可以在下方输入框输入指令';
+      return;
+    }
+    this.voiceBusy = true; this.voiceHeard = ''; this.voiceReply = '';
+    this.voiceStatus = '正在打开麦克风…';
+    const started = await VoiceListen.start(
+      (text: string, final: boolean): void => {
+        this.voiceHeard = text;
+        if (final) { this.voiceBusy = false; this.runVoiceText(text, true); }
+      },
+      (message: string): void => { this.voiceStatus = message; },
+      (message: string): void => {
+        this.voiceBusy = false;
+        if (!this.voiceHeard) { this.voiceStatus = message || '没听清，请再说一次'; }
+      });
+    if (!started) {
+      this.voiceBusy = false;
+      this.voiceStatus = '这台设备暂时用不了语音识别，可在下方输入框输入同样的话';
+    }
+  }
+  // 手动输入与语音识别走同一条解析与执行路径，没麦克风也能验证全部指令。
+  private async runVoiceText(text: string, fromVoice: boolean): Promise<void> {
+    const content = (text || '').trim();
+    if (!content) { this.voiceStatus = '请先说“小颐”，再说要做什么'; return; }
+    const intent: VoiceIntent = VoiceCommand.parse(content);
+    this.voiceHeard = content;
+    if (fromVoice && !intent.wake) {
+      this.voiceStatus = '先说唤醒词“小颐”，再说要做什么';
+      this.voiceReply = '例如：小颐开灯';
+      if (this.voiceOn) { Voice.speak('请先说小颐'); }
+      return;
+    }
+    await this.executeVoice(intent);
+  }
+  private async executeVoice(intent: VoiceIntent): Promise<void> {
+    const type = intent.type;
+    const controlled=['light_on','light_off','light_auto','sos','medicine','ack'].includes(type);
+    const privateData=['temperature','trend','device','camera'].includes(type);
+    if(controlled&&!this.allowed('control')||privateData&&!this.allowed('view')){this.voiceReply='当前账号没有这项操作权限';return;}
+    let reply = intent.reply;
+    if (type === 'light_on' || type === 'light_off' || type === 'light_auto') {
+      if (!this.demo && !this.loggedIn) { reply = '还没登录家庭账号，先登录才能控制夜灯'; }
+      else if (!this.living) { reply = '还没收到设备状态，稍等几秒再说一次'; }
+      else if (!this.livingFresh()) { reply = '设备数据已过期，先刷新再控制'; }
+      else {
+        const mode: number = type === 'light_on' ? 1 : type === 'light_off' ? 0 : -1;
+        this.sendLiving('set_light', { mode: mode });
+        reply = type === 'light_on' ? '已发送开灯' : type === 'light_off' ? '已发送关灯' : '已切换为自动夜灯';
+      }
+    } else if (type === 'sos') {
+      if (!this.demo && !this.loggedIn) { reply = '还没登录家庭账号，无法发送求助'; }
+      else { this.careAction(true); reply = '正在发起求助，请在弹窗里确认'; }
+    } else if (type === 'medicine') {
+      const pending = pendingMedicine(this.living);
+      if (!this.living || !pending.length) { reply = '现在没有待确认的服药提醒'; }
+      else { this.medicineNoticeSlot = pending[0].slot; this.confirmMedicine(); reply = '已记下这次服药'; }
+    } else if (type === 'ack') {
+      if (!this.demo && !this.loggedIn) { reply = '还没登录家庭账号，无法确认报警'; }
+      else { this.command('ack'); reply = '正在确认报警，请在弹窗里核对'; }
+    } else if (type === 'temperature') {
+      const hasTemp = this.temp > -900;
+      const hasHumi = this.humi > -900;
+      if (hasTemp && hasHumi) { reply = '现在 ' + this.temp.toFixed(1) + ' 度，湿度 ' + this.humi.toFixed(0) + '%'; }
+      else if (hasTemp) { reply = '现在 ' + this.temp.toFixed(1) + ' 度，湿度还没收到'; }
+      else { reply = '还没收到温湿度数据，稍后再问一次'; }
+    } else if (type === 'alarm') { this.navigate(1); reply = '已打开报警记录'; }
+    else if (type === 'trend') { this.navigate(2); reply = '已打开活动趋势'; }
+    else if (type === 'device') { this.navigate(3); reply = '已打开设备状态'; }
+    else if (type === 'camera') { this.detail = ''; router.pushUrl({ url: 'pages/Camera' }); reply = '正在打开家中画面'; }
+    else if (type === 'help') { reply = '我可以说：开灯、关灯、自动夜灯、救命、我吃过药了、现在温度、看报警、看趋势、看设备、打开摄像头'; }
+    else if (type === 'awake') { reply = '我在，请说要做什么'; }
+    this.voiceStatus = type === 'unknown' ? '这句没听懂，换个说法试试' : '已执行';
+    this.voiceReply = reply;
+    this.voiceTick = reply;
+    if (this.voiceOn) { Voice.speak(reply, type === 'sos'); }
+  }
+  private async setVoice(on: boolean): Promise<void> {
+    this.voiceOn = on;
+    Voice.setEnabled(on);
+    if (on) {
+      const ready = await Voice.prepare();
+      this.voiceMessage = ready ? '语音已打开：报警和服药会念出来' : '本机没有可用的离线语音引擎，暂时只能看弹窗提醒';
+      if (ready) { Voice.speak('语音提醒已打开'); }
+    } else {
+      this.voiceMessage = '已关闭语音播报，弹窗与记录仍然保留';
+    }
+    try {
+      const store = await preferences.getPreferences(getContext(this), 'zhian_settings');
+      await store.put('voice_announce', on); await store.flush();
+    } catch (_) { this.error = '语音偏好未保存，下次启动请重新确认'; }
+  }
   private previewAlert(): void {
     if (!this.demo) { return; }
     const item: AlarmEvent = { boot_id: 0, event_id: Date.now(), code: 1, phase: 'start',
@@ -505,33 +767,85 @@ struct Index {
     this.passwordDraft = this.loggedIn ? this.sessionPassword : '';
     this.settingsOpen = true;
   }
+  private async persistSettings(): Promise<void> {
+    try {
+      const store = await preferences.getPreferences(getContext(this), 'zhian_settings');
+      await store.put('server', this.serverDraft); await store.put('username', this.userDraft); await store.flush();
+    } catch (_) { /* Login can work without persisted settings. */ }
+  }
+  // Everything that must be rebuilt when the active account changes.
+  private applySessionState(name: string, password: string): void {
+    this.api.username = name;
+    this.sessionPassword = password;
+    this.familyNodes = []; this.familyRole = ''; this.members = [];
+    this.doorRecords=null;this.doorRecordMessage='';this.careActionMessage='';this.sosRequest='';
+    this.accountName = name; this.alertQueue = []; this.inbox = new AlarmInbox();
+    this.generation++; this.polling = false; this.detailsPolling = false; this.healthPolling = false; this.familyPolling = false; this.demo = false; this.loggedIn = true; this.simulated = false;
+    this.temp = -999; this.humi = -999; this.gas = -999; this.light = -999; this.received = 0; this.deviceTime = 0;
+    this.doorValue = -1; this.doorEnabled = -1; this.doorValid = -1;
+    this.activityReport=null;this.reportMessage='';this.living=null;this.medicineNotice=false;this.medicineSeen=[];this.livingOpen=false;this.acknowledgedAlarms=[];this.healthBoot=-1;this.healthUp=-1;this.healthKnown = false; this.healthReceived = 0; this.healthSignature = ''; this.firmware = ''; this.muted = false; this.alarms = []; this.hours = []; this.days = []; this.activityTotal = 0; this.alarmTotal = 0;
+  }
+  private async signIn(server: string, username: string, password: string): Promise<void> {
+    await this.api.login(server, username, password);
+    this.applySessionState(username, password);
+    this.serverDraft = server; this.userDraft = username;
+    this.passwordDraft = ''; this.settingsOpen = false;
+    await this.persistSettings();
+    await this.loadProfile();
+    await this.refreshFamily();
+    await this.refresh(true); this.startPush();
+    await this.rememberAccount(username);
+  }
+  private async rememberAccount(username: string): Promise<void> {
+    if (!this.api.token || !username) { return; }
+    const entry: SavedAccount = {
+      server: this.api.base, username: username, role: this.familyRole,
+      token: this.api.token, expiresAt: this.api.tokenExpiresAt,
+      devices: this.familyNodes.length, lastUsed: Date.now()
+    };
+    this.accounts = await Accounts.save(getContext(this) as common.UIAbilityContext, entry);
+  }
   private async login(): Promise<void> {
     if (this.loginBusy) { return; }
     this.loginBusy = true; this.error = '';
     const loginPassword = this.passwordDraft;
     try {
-      await this.api.login(this.serverDraft, this.userDraft, loginPassword);
-      this.sessionPassword = loginPassword;
-      this.familyNodes = []; this.familyRole = '';
-      this.doorRecords=null;this.doorRecordMessage='';this.careActionMessage='';this.sosRequest='';
-      this.accountName = this.userDraft.trim(); this.alertQueue = []; this.inbox = new AlarmInbox();
-      this.generation++; this.polling = false; this.detailsPolling = false; this.healthPolling = false; this.familyPolling = false; this.demo = false; this.loggedIn = true; this.simulated = false;
-      this.temp = -999; this.humi = -999; this.gas = -999; this.light = -999; this.received = 0; this.deviceTime = 0;
-      this.doorValue = -1; this.doorEnabled = -1; this.doorValid = -1;
-      this.activityReport=null;this.reportMessage='';this.living=null;this.medicineNotice=false;this.medicineSeen=[];this.livingOpen=false;this.acknowledgedAlarms=[];this.healthBoot=-1;this.healthUp=-1;this.healthKnown = false; this.healthReceived = 0; this.healthSignature = ''; this.firmware = ''; this.muted = false; this.alarms = []; this.hours = []; this.days = []; this.activityTotal = 0; this.alarmTotal = 0;
-      this.passwordDraft = ''; this.settingsOpen = false;
-      try {
-        const store = await preferences.getPreferences(getContext(this), 'zhian_settings');
-        await store.put('server', this.serverDraft); await store.put('username', this.userDraft); await store.flush();
-      } catch (_) { /* Login can work without persisted settings. */ }
-      await this.loadProfile();
-      await this.refresh(true); this.startPush();
+      await this.signIn(this.serverDraft, this.userDraft.trim(), loginPassword);
     } catch (error) { this.error = (error as Error).message || '登录失败，请核对地址、密码和开发证书'; }
     finally { this.loginBusy = false; }
   }
+  // Switching identity always requires its own password.
+  private async switchAccount(entry: SavedAccount): Promise<void> {
+    if (this.switchBusy || this.loginBusy) { return; }
+    if (!this.demo && this.loggedIn && entry.username === this.accountName && entry.server === this.api.base) {
+      this.switchMessage = '当前已经在使用 ' + entry.username; return;
+    }
+    this.switchMessage='切换账号需要验证该账号密码';
+    this.serverDraft=entry.server;this.userDraft=entry.username;this.passwordDraft='';this.settingsOpen=true;
+
+  }
+  private async signInSwitch(): Promise<void> {
+    if (this.switchBusy || this.loginBusy || !this.switchUser) { return; }
+    if (this.switchPassword.length < 1) { this.switchMessage = '请输入该账号的密码'; return; }
+    this.switchBusy = true;
+    try {
+      await this.signIn(this.switchServer, this.switchUser, this.switchPassword);
+      this.switchMessage = '已切换到 ' + this.switchUser;
+      this.switchUser = ''; this.switchPassword = ''; this.switchServer = '';
+    } catch (error) { this.switchMessage = (error as Error).message; }
+    finally { this.switchBusy = false; }
+  }
   private async disconnect(): Promise<void> {
+    const name = this.accountName, server = this.api.base, known = this.accounts;
     this.generation++; this.loggedIn = false; this.polling = false; this.online = false;
     await this.api.logout().catch(() => {}); this.selected = null; this.settingsOpen = false; this.profileOpen = false; this.loadDemo(); await this.loadProfile();
+    // The server dropped this token, so keep the account for switching but mark it as needing a password.
+    const previous = known.find((item: SavedAccount): boolean => item.username === name && item.server === server);
+    if (previous) {
+      this.accounts = await Accounts.save(getContext(this) as common.UIAbilityContext, {
+        server: previous.server, username: previous.username, role: previous.role,
+        token: '', expiresAt: 0, devices: previous.devices, lastUsed: previous.lastUsed });
+    }
   }
   private livingFresh(): boolean { return this.demo || this.livingDataFresh && this.healthFresh() && this.online && this.loggedIn; }
   private openLiving(): void {
@@ -552,11 +866,14 @@ struct Index {
     for(const slot of pending) {
       const key=day+':'+slot.slot;
       if(!this.medicineSeen.includes(key)) {
-        this.medicineSeen=this.medicineSeen.concat([key]);this.medicineNoticeSlot=slot.slot;this.medicineNotice=true;break;
+        this.medicineSeen=this.medicineSeen.concat([key]);this.medicineNoticeSlot=slot.slot;this.medicineNotice=true;
+        if(this.voiceOn){Voice.speak('到吃药时间了，请按时服药，服完在手机上确认',true);}
+        break;
       }
     }
   }
   private updateMedicineDraft(index: number, enabled?: boolean, hour?: string, minute?: string): void {
+    this.livingMessage='服药时段设置待保存，请点击保存提醒设置';
     this.medicineDrafts=this.medicineDrafts.map((draft:MedicineDraft):MedicineDraft=>draft.slot===index?{slot:index,enabled:enabled!==undefined?enabled:draft.enabled,hour:hour!==undefined?hour:draft.hour,minute:minute!==undefined?minute:draft.minute}:draft);
   }
   private async loadMedicineHistory(): Promise<void> {
@@ -569,6 +886,7 @@ struct Index {
     } catch(error) {if(generation===this.generation){this.medicineHistoryMessage='服药历史暂不可用，请确认后端已更新';}}
   }
   private async sendLiving(name: string, paras: CommandParameters): Promise<void> {
+    if(!this.allowed('control')){this.livingMessage='此账号没有设备控制权限';return;}
     if (this.careActionBusy || this.livingBusy || this.commandBusy || !this.living || !this.livingFresh()) { return; }
     const generation=this.generation;
     this.livingBusy=true; this.livingMessage='正在等待设备执行回执…';
@@ -581,7 +899,7 @@ struct Index {
             this.living.light_owner=this.living.night_on?'night':'off';
           }
         } else {this.living=demoLivingUpdate(this.living,name,paras,Math.floor(Date.now()/1000),this.light);}
-        this.livingMessage='演示已更新，未操作真实设备';this.livingOpen=false;
+        this.livingMessage='演示已更新，未操作真实设备';
         this.medicineNotice=false;this.updateMedicineNotice();
         return;
       }
@@ -594,7 +912,22 @@ struct Index {
         result=(await this.api.request('/api/v1/commands/'+encodeURIComponent(result.command_id))).data as Command;
       }
       if(generation!==this.generation){return;}
-      if(result.state==='executed' && result.result_code===0) { this.livingMessage='设备已确认执行，等待状态上报';this.livingOpen=false;if(name==='confirm_medicine'||name==='set_medicine_state'){this.medicineNotice=false;} }
+      if(result.state==='executed' && result.result_code===0) {
+        this.livingMessage='设备已执行，正在核对最新状态…';
+        let matched=false;
+        for(let attempt=0;attempt<10;attempt++) {
+          if(generation!==this.generation){return;}
+          const reply=await this.api.request(this.api.path('health'),http.RequestMethod.GET,'',8000);
+          if(generation!==this.generation){return;}
+          if(reply.data){this.applyHealth(reply.data as Health);}
+          if(this.livingFresh()&&livingCommandMatches(this.living,name,paras)){matched=true;break;}
+          await new Promise<void>((resolve)=>{setTimeout(()=>{resolve();},1000);});
+        }
+        if(generation!==this.generation){return;}
+        this.livingMessage=matched?'设备设置已生效，状态已同步':'设备已确认执行，但新状态尚未同步，请稍后核对；当前显示最近上报';
+        if(matched&&this.living){this.livingRevision=this.living.config_revision;this.nightDraft=this.living.night_auto;}
+        if(name==='confirm_medicine'||name==='set_medicine_state'){this.medicineNotice=false;}
+      }
       else {this.livingMessage=result.result_code===4?'设置已在板端或其他手机更改，请关闭后重新打开设置':result.state==='pending'||result.state==='unknown'?'执行结果未确认，请核对设备状态':'设备未执行，请检查设备时间及后端物模型';}
       await this.refresh(true);
     } catch(error) {if(generation===this.generation){this.livingMessage='操作未确认：'+(error as Error).message;}}
@@ -626,6 +959,7 @@ struct Index {
     if(slot){this.changeMedicine(slot.slot,true);}
   }
   private async command(name: string): Promise<void> {
+    if(!this.allowed('control')){this.commandMessage='此账号没有设备控制权限';return;}
     if (this.careActionBusy || this.commandBusy || (name !== 'ack' && name !== 'mute')) { return; }
     if (!this.demo && !this.loggedIn) {
       this.commandMessage = '请先登录后端，再操作真实设备';
@@ -693,6 +1027,7 @@ struct Index {
     return this.alarms.filter((item:AlarmEvent)=>!item.handling || item.handling.resolution==='follow_up');
   }
   private async careAction(sos: boolean, oldOnly: boolean = false): Promise<void> {
+    if(!this.allowed(sos?'control':'alarms.handle')){this.careActionMessage='此账号没有该操作权限';return;}
     if(this.careActionBusy || this.noteSaving || this.commandBusy){return;}
     if(!this.demo && !this.loggedIn){this.openConnection();return;}
     const generation=this.generation;
@@ -747,8 +1082,8 @@ struct Index {
   careActions() {
     Column({space:10}) {
       Row({space:12}) {
-        Button(this.careActionBusy?'提交中…':'主动呼救').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(Color.White).backgroundColor(RED).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy).onClick(()=>{this.careAction(true);})
-        Button('一键处理全部').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy).onClick(()=>{this.chooseBatchScope();})
+        Button(this.careActionBusy?'提交中…':'主动呼救').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(Color.White).backgroundColor(RED).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('control')).onClick(()=>{this.careAction(true);})
+        Button('一键处理全部').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('alarms.handle')).onClick(()=>{this.chooseBatchScope();})
       }.width('100%')
       if(this.careActionMessage){Text(this.careActionMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%')}
     }.padding(16).backgroundColor(Color.White).borderRadius(16).width('100%').margin({top:16,bottom:8})
@@ -756,7 +1091,7 @@ struct Index {
   private async showAlarm(item: AlarmEvent): Promise<void> {
     if(this.noteSaving){return;}
     const operation=++this.noteOperation;
-    this.selected=item; this.noteDraft=''; this.notes=[]; this.resolution='handled'; this.noteMessage='';
+    this.selected=item; this.noteDraft=''; this.notes=[]; this.resolution='handled'; this.noteMessage='';this.noteRequest='';this.noteRequestBody='';
     if(this.demo){
       this.notes=this.demoNotes.get(alarmKey(item)) || [];
       return;
@@ -770,23 +1105,49 @@ struct Index {
       if(operation===this.noteOperation){this.noteMessage='备注读取失败：'+(error as Error).message;}
     }
   }
+  private async claimAlarm(release:boolean=false): Promise<void> {
+    if(!this.selected||this.claimBusy||this.noteSaving||!this.allowed('alarms.handle')){return;}
+    const key=alarmKey(this.selected), generation=this.generation;
+    this.claimBusy=true;this.noteMessage='';
+    try{
+      if(!this.demo){await this.api.request(this.api.path('alarms/'+key+'/claim'),release?http.RequestMethod.DELETE:http.RequestMethod.POST);}
+      if(generation!==this.generation){return;}
+      if(this.selected&&alarmKey(this.selected)===key){
+        const item=this.selected;
+        this.selected={boot_id:item.boot_id,event_id:item.event_id,code:item.code,phase:item.phase,epoch:item.epoch,up:item.up,duration:item.duration,value:item.value,source:item.source,source_device_id:item.source_device_id,handling:item.handling,claim:release?undefined:{username:this.accountName||'演示用户',created:Date.now()/1000}};
+      }
+      this.noteMessage=release?'已释放认领，其他成员可以接手':'已认领，请核实现场后保存处理记录';
+      if(!this.demo){await this.refreshEvents(generation);}
+    }catch(error){if(generation===this.generation){this.noteMessage='认领操作未完成：'+collaborationError((error as Error).message);await this.refreshEvents(generation);}}
+    finally{this.claimBusy=false;}
+  }
+  private async refreshSelectedNotes(): Promise<void> {
+    if(!this.selected||this.demo){return;}
+    const key=alarmKey(this.selected), generation=this.generation;
+    try{
+      const reply=await this.api.request(this.api.path('alarms/'+key+'/notes'));
+      if(generation===this.generation&&this.selected&&alarmKey(this.selected)===key){this.notes=(reply.data as NoteList).items||[];}
+    }catch(error){this.expiredSession(generation);}
+  }
   private async saveNote(): Promise<void> {
-    if(!this.selected || this.noteSaving || this.careActionBusy){return;}
+    if(!this.selected || this.noteSaving || this.careActionBusy || !this.allowed('alarms.handle')){return;}
     const item=this.selected;
     const text=noteText(this.noteDraft,this.resolution);
     const resolution=this.resolution;
+    const payload=JSON.stringify({note:text,resolution:resolution});
+    if(payload!==this.noteRequestBody){this.noteRequestBody=payload;this.noteRequest='note-'+Date.now()+'-'+Math.random().toString(36).slice(2);}
     const operation=++this.noteOperation;
     this.noteSaving=true; this.noteMessage='正在保存处理记录…';
     try {
       if(!this.demo) {
         await this.api.request(this.api.path('alarms/'+alarmKey(item)+'/notes'),http.RequestMethod.POST,
-          JSON.stringify({note:text,resolution:resolution}));
+          JSON.stringify({note:text,resolution:resolution,client_request_id:this.noteRequest}));
       }
       if(operation!==this.noteOperation){return;}
-      this.notes=this.notes.concat([{note:text,resolution:resolution,username:this.demo?'演示用户':this.userDraft}]);
+      this.notes=this.notes.concat([{note:text,resolution:resolution,username:this.demo?'演示用户':this.accountName}]);
       if(this.demo){this.demoNotes.set(alarmKey(item),this.notes);}
       this.alarms=this.alarms.map((record:AlarmEvent):AlarmEvent=>{
-        if(alarmKey(record)===alarmKey(item)){record.handling={resolution:resolution,username:this.userDraft,created:Date.now()/1000};}
+        if(alarmKey(record)===alarmKey(item)){record.handling={resolution:resolution,username:this.accountName,created:Date.now()/1000};}
         return record;
       });
       this.pruneAlerts();
@@ -795,7 +1156,7 @@ struct Index {
       // Close only after persistence succeeds; queued taps then have no selected event.
       this.selected=null;
     } catch(error) {
-      if(operation===this.noteOperation){this.noteMessage='保存失败：'+(error as Error).message;}
+      if(operation===this.noteOperation){this.noteMessage=(error as Error).message.includes('Alarm not found')?'该事件已不在服务器中，请关闭后刷新报警列表，再选择现有事件处理':'保存失败：'+collaborationError((error as Error).message);}
     } finally {
       if(operation===this.noteOperation){this.noteSaving=false;}
     }
@@ -866,13 +1227,15 @@ struct Index {
       Text($$.value).fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({maxWidth:'48%'}).textAlign(TextAlign.End)
       this.icon($r('app.media.chevron'),16)
     }.width('100%').constraintSize({minHeight:56}).padding({top:10,bottom:10}).onClick(()=>{
+      if(['living','trend','environment','wearable','camera','activity','door','reports','diagnostics'].includes($$.action)&&!this.allowed('view')){this.familyMessage='当前账号仅开放报警协作';return;}
       if($$.action==='living'){this.openLiving();}
       else if($$.action==='trend'){this.navigate(2);}
       else if($$.action==='environment'||$$.action==='wearable'){router.pushUrl({url:'pages/Nodes',params:{kind:$$.action}});}
       else if($$.action==='camera'){router.pushUrl({url:'pages/Camera'});}
+      else if($$.action==='messages'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/Messages'});}else{this.openConnection();}}
       else if($$.action==='connection'){this.openConnection();}
       else if($$.action==='profile'){this.editProfile();}
-      else {this.detail=$$.action;this.pageScroller.scrollTo({xOffset:0,yOffset:0});}
+      else {this.detail=$$.action;this.pageScroller.scrollTo({xOffset:0,yOffset:0});if($$.action==='members'){this.refreshFamily();}}
     })
   }
   @Builder
@@ -887,7 +1250,14 @@ struct Index {
     Column() {
       this.brandHeader()
       Text(this.careName+'的守护').fontSize(this.readableSize(27)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
-      Text('把关心，放在日常里').fontSize(this.readableSize(14)).fontColor(SUB).width('100%').margin({top:5,bottom:18})
+      Text('把关心，放在日常里').fontSize(this.readableSize(14)).fontColor(SUB).width('100%').margin({top:5,bottom:14})
+      Row({space:12}){
+        Column({space:5}){
+          Text('对小颐说').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
+          Text(this.voiceTick||'“小颐开灯” · “小颐救命” · “小颐我吃过药了”').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis})
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button('语音',{type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(Color.White).backgroundColor(PRIMARY).borderRadius(12).constraintSize({minHeight:44,minWidth:72}).onClick(()=>{this.openVoice();})
+      }.width('100%').padding(14).backgroundColor(Color.White).borderRadius(16).margin({bottom:14})
       Column({space:12}) {
         Row({space:12}) {
           this.icon(this.assessment().level==='normal'?$r('app.media.shield_white'):this.assessment().level==='alert'?$r('app.media.warning_white'):$r('app.media.clock_white'),30)
@@ -949,9 +1319,9 @@ struct Index {
         Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(13)).fontColor(PRIMARY).constraintSize({maxWidth:130}).textAlign(TextAlign.End)
       }.width('100%')
       Row({space:8}) {
-        Button('开灯').fontSize(13).fontColor(Color.White).backgroundColor(PRIMARY).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:1});})
-        Button('关灯').fontSize(13).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:0});})
-        Button('恢复自动').fontSize(13).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:-1});})
+        Button('开灯').fontSize(13).fontColor(Color.White).backgroundColor(PRIMARY).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:1});})
+        Button('关灯').fontSize(13).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:0});})
+        Button('恢复自动').fontSize(13).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:-1});})
       }.width('100%')
       Text('报警、服药提示优先；重启后恢复自动策略').fontSize(13).fontColor(SUB).width('100%')
       Divider().color('#EDF2F3')
@@ -987,12 +1357,12 @@ struct Index {
         Column({space:20}) {
           Text(this.demo?'演示设置，不操作真实设备':this.livingFresh()?'设置以设备回执为准':'设备状态待同步，当前仅可查看').fontSize(this.readableSize(14)).fontColor(this.livingFresh()?SUB:AMBER).width('100%')
           Column({space:14}) {
-            Row({space:10}){this.icon($r('app.media.lamp'),24);Column({space:5}){Text('自动夜灯').fontSize(this.readableSize(18)).fontWeight(FontWeight.Bold).fontColor(INK);Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(14)).fontColor(SUB)}.layoutWeight(1).alignItems(HorizontalAlign.Start);Toggle({type:ToggleType.Switch,isOn:this.nightDraft}).selectedColor(PRIMARY).enabled(!this.livingBusy&&this.livingFresh()).onChange((v:boolean)=>{this.nightDraft=v;})}.width('100%')
-            Text('低于 30 lx 开灯，高于 60 lx 关灯').fontSize(this.readableSize(14)).fontColor(SUB).width('100%')
+            Row({space:10}){this.icon($r('app.media.lamp'),24);Column({space:5}){Text('自动夜灯').fontSize(this.readableSize(18)).fontWeight(FontWeight.Bold).fontColor(INK);Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(14)).fontColor(SUB)}.layoutWeight(1).alignItems(HorizontalAlign.Start);Toggle({type:ToggleType.Switch,isOn:this.nightDraft}).selectedColor(PRIMARY).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onChange((v:boolean)=>{this.nightDraft=v;this.livingMessage='自动夜灯设置待保存，请点击保存提醒设置';})}.width('100%')
+            Text('开关用于启用自动感光；修改后需保存。低于 30 lx 开灯，高于 60 lx 关灯').fontSize(this.readableSize(14)).fontColor(SUB).width('100%')
             Row({space:8}) {
-              Button('开灯',{type:ButtonType.Normal}).fontSize(14).fontColor(Color.White).backgroundColor(PRIMARY).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:1});})
-              Button('关灯',{type:ButtonType.Normal}).fontSize(14).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:0});})
-              Button('自动',{type:ButtonType.Normal}).fontSize(14).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()).onClick(()=>{this.sendLiving('set_light',{mode:-1});})
+              Button('开灯',{type:ButtonType.Normal}).fontSize(14).fontColor(this.living?.light_mode===1?Color.White:PRIMARY).backgroundColor(this.living?.light_mode===1?PRIMARY:CareTheme.softBlue).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:1});})
+              Button('关灯',{type:ButtonType.Normal}).fontSize(14).fontColor(this.living?.light_mode===0?Color.White:PRIMARY).backgroundColor(this.living?.light_mode===0?PRIMARY:CareTheme.softBlue).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:0});})
+              Button('自动',{type:ButtonType.Normal}).fontSize(14).fontColor(this.living?.light_mode===-1?Color.White:PRIMARY).backgroundColor(this.living?.light_mode===-1?PRIMARY:CareTheme.softBlue).layoutWeight(1).constraintSize({minHeight:48}).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.sendLiving('set_light',{mode:-1});})
             }.width('100%')
             Text('报警与服药提示优先，重启后恢复自动策略').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
           }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%')
@@ -1001,21 +1371,21 @@ struct Index {
             Text('北京时间 · 按已有医嘱设置').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
             ForEach(this.medicineDrafts,(draft:MedicineDraft)=>{
               Column({space:10}) {
-                Row(){Text('第 '+(draft.slot+1)+' 时段').fontSize(this.readableSize(16)).fontColor(INK).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:draft.enabled}).selectedColor(PRIMARY).enabled(!this.livingBusy&&this.livingFresh()).onChange((v:boolean)=>{this.updateMedicineDraft(draft.slot,v);})}.width('100%')
+                Row(){Text('第 '+(draft.slot+1)+' 时段').fontSize(this.readableSize(16)).fontColor(INK).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:draft.enabled}).selectedColor(PRIMARY).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onChange((v:boolean)=>{this.updateMedicineDraft(draft.slot,v);})}.width('100%')
                 Row({space:8}){
-                  TextInput({text:draft.hour,placeholder:'08'}).type(InputType.Number).maxLength(2).fontSize(this.readableSize(27)).fontColor(INK).textAlign(TextAlign.Center).height(56).layoutWeight(1).backgroundColor(BG).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()).onChange((v:string)=>{this.updateMedicineDraft(draft.slot,undefined,v);})
+                  TextInput({text:draft.hour,placeholder:'08'}).type(InputType.Number).maxLength(2).fontSize(this.readableSize(27)).fontColor(INK).textAlign(TextAlign.Center).height(56).layoutWeight(1).backgroundColor(BG).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onChange((v:string)=>{this.updateMedicineDraft(draft.slot,undefined,v);})
                   Text(':').fontSize(27).fontColor(INK)
-                  TextInput({text:draft.minute,placeholder:'00'}).type(InputType.Number).maxLength(2).fontSize(this.readableSize(27)).fontColor(INK).textAlign(TextAlign.Center).height(56).layoutWeight(1).backgroundColor(BG).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()).onChange((v:string)=>{this.updateMedicineDraft(draft.slot,undefined,undefined,v);})
+                  TextInput({text:draft.minute,placeholder:'00'}).type(InputType.Number).maxLength(2).fontSize(this.readableSize(27)).fontColor(INK).textAlign(TextAlign.Center).height(56).layoutWeight(1).backgroundColor(BG).borderRadius(12).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onChange((v:string)=>{this.updateMedicineDraft(draft.slot,undefined,undefined,v);})
                 }.width('100%')
                 ForEach(medicineSlots(this.living).filter((slot:MedicineSlot)=>slot.slot===draft.slot),(slot:MedicineSlot)=>{this.doseActions(slot)},(slot:MedicineSlot)=>slot.slot+':'+slot.state+':'+this.livingFresh())
               }.width('100%').padding({top:12,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line})
-            },(draft:MedicineDraft)=>draft.slot.toString())
+            },(draft:MedicineDraft)=>draft.slot+':'+draft.enabled)
             if(!this.living){Text('等待设备生活提醒状态').fontSize(14).fontColor(AMBER)}
             if(this.living&&this.living.schema===1){Text('旧版设备仅支持一个时段，已保留兼容。').fontSize(13).fontColor(AMBER)}
             Text('确认仅记录用户操作，不能证明已实际服药。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
           }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%')
           if(this.livingMessage){Text(this.livingMessage).fontSize(this.readableSize(14)).fontColor(AMBER).width('100%')}
-          Button(this.livingBusy?'等待设备确认…':'保存提醒设置',{type:ButtonType.Normal}).fontSize(this.readableSize(16)).width('100%').constraintSize({minHeight:48}).borderRadius(12).backgroundColor(PRIMARY).enabled(this.livingFresh()&&!this.livingBusy&&!this.commandBusy).onClick(()=>{this.saveLiving();})
+          Button(this.livingBusy?'等待设备确认…':'保存提醒设置',{type:ButtonType.Normal}).fontSize(this.readableSize(16)).width('100%').constraintSize({minHeight:48}).borderRadius(12).backgroundColor(PRIMARY).enabled(this.livingFresh()&&!this.livingBusy&&!this.commandBusy&&this.allowed('control')).onClick(()=>{this.saveLiving();})
           Column({space:12}) {
             Text('服药历史').fontSize(this.readableSize(18)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
             if(this.medicineHistoryMessage){Text(this.medicineHistoryMessage).fontSize(13).fontColor(SUB).width('100%')}
@@ -1034,15 +1404,15 @@ struct Index {
       Text(this.demo?'演示提醒，不操作真实设备':'已到每日提醒时间，请根据实际情况确认。').fontSize(this.readableSize(14)).fontColor(SUB)
       Text('确认仅记录一次用户操作，无法证明已经实际服药。').fontSize(this.readableSize(13)).fontColor(SUB)
       if(this.livingMessage){Text(this.livingMessage).fontSize(this.readableSize(13)).fontColor(AMBER)}
-      Button(this.livingBusy?'等待设备回执…':'确认已服药').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(PRIMARY).enabled(!this.livingBusy&&!this.commandBusy&&this.livingFresh()).onClick(()=>{this.confirmMedicine();})
+      Button(this.livingBusy?'等待设备回执…':'确认已服药').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(PRIMARY).enabled(!this.livingBusy&&!this.commandBusy&&this.livingFresh()&&this.allowed('control')).onClick(()=>{this.confirmMedicine();})
       Button('稍后处理').width('100%').height(this.elderMode ? 60 : 42).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).enabled(!this.livingBusy).onClick(()=>{this.medicineNotice=false;})
     }.padding(24).width('90%').backgroundColor(Color.White).borderRadius(16)
   }
   @Builder
   controls() {
     Row({ space: 12 }) {
-      Button(this.commandBusy ? '操作进行中…' : '确认设备报警').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(Color.White).backgroundColor(PRIMARY).height(this.elderMode ? 60 : 48).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy).onClick(() => { this.command('ack'); })
-      Button(this.healthFresh() && this.muted ? '设备已消音' : '设备消音').fontSize(this.readableSize(14)).fontColor(INK).backgroundColor('#E7EDF0').height(this.elderMode ? 60 : 48).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy).onClick(() => { this.command('mute'); })
+      Button(this.commandBusy ? '操作进行中…' : '确认设备报警').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(Color.White).backgroundColor(PRIMARY).height(this.elderMode ? 60 : 48).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy&&this.allowed('control')).onClick(() => { this.command('ack'); })
+      Button(this.healthFresh() && this.muted ? '设备已消音' : '设备消音').fontSize(this.readableSize(14)).fontColor(INK).backgroundColor('#E7EDF0').height(this.elderMode ? 60 : 48).layoutWeight(1).borderRadius(14).enabled(!this.commandBusy&&this.allowed('control')).onClick(() => { this.command('mute'); })
     }.width('100%')
     if (!this.demo && (!this.online || this.stale())) { Text('设备离线或上报过期，远程操作可能无法送达，请联系现场人员。').fontSize(this.readableSize(13)).fontColor(AMBER).lineHeight(this.readableLine(20)).width('100%').margin({top:9}) }
     Text('消音只停止提示声音；确认设备报警不等于完成现场处置，也不会自动保存处理记录。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(19)).width('100%').margin({top:9})
@@ -1255,22 +1625,76 @@ struct Index {
         Divider().color(CareTheme.line).strokeWidth(0.5)
         Row({space:12}){Column({space:4}){Text('前台报警弹窗').fontSize(this.readableSize(16)).fontColor(INK);Text(this.alarmReminders?'新报警及时提醒':'关闭弹窗，记录仍保留').fontSize(this.readableSize(13)).fontColor(SUB)}.layoutWeight(1).alignItems(HorizontalAlign.Start);Toggle({type:ToggleType.Switch,isOn:this.alarmReminders}).selectedColor(PRIMARY).onChange((value:boolean)=>{this.setReminders(value);})}.width('100%').padding({top:16,bottom:16})
         Divider().color(CareTheme.line).strokeWidth(0.5)
+        Row({space:12}){
+          Column({space:4}){Text('语音播报').fontSize(this.readableSize(16)).fontColor(INK);Text(this.voiceOn?'报警和服药会用语音念出来':'只弹窗与振动，不出声').fontSize(this.readableSize(13)).fontColor(SUB)}.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          Toggle({type:ToggleType.Switch,isOn:this.voiceOn}).selectedColor(PRIMARY).onChange((value:boolean)=>{this.setVoice(value);})
+        }.width('100%').padding({top:16,bottom:16})
+        if(this.voiceMessage){Text(this.voiceMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%').padding({bottom:12}).lineHeight(this.readableLine(19))}
+        Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.pill'),title:'生活提醒',value:'夜灯与服药',action:'living'})
         if(this.elderModeMessage){Text(this.elderModeMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%').padding({bottom:12})}
       }.padding({left:16,right:16}).backgroundColor(Color.White).borderRadius(16).width('100%')
       this.section({title:'账户与帮助',subtitle:''})
       Column(){
+        this.entryRow({icon:$r('app.media.home'),title:'家人消息',value:'好友与聊天',action:'messages'})
+        Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.home'),title:'家庭成员',value:this.familyRole==='owner'?'邀请与权限':'查看家庭设备',action:'members'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.device'),title:'账户与连接',value:this.loggedIn?'管理':'登录',action:'connection'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.shield'),title:'守护说明',value:'了解监测边界',action:'help'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
-        this.info({label:'应用版本',value:'颐鸿安 1.13.4',color:SUB})
+        this.info({label:'应用版本',value:'颐鸿安 '+(this.appVersion||'1.13.8'),color:SUB})
       }.padding({left:16,right:16}).backgroundColor(Color.White).borderRadius(16).width('100%')
       if(this.demo){Button('体验报警提醒', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:48}).borderRadius(12).width('100%').margin({top:20}).onClick(()=>{this.previewAlert();})}
       if(this.loggedIn){Button('退出登录', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(SUB).backgroundColor(Color.Transparent).constraintSize({minHeight:48}).width('100%').margin({top:20}).onClick(()=>{this.disconnect();})}
       Text('颐鸿安 · 把关心，放在日常里').fontSize(this.readableSize(13)).fontColor(SUB).margin({top:20,bottom:12})
+    }.width('100%')
+  }
+  @Builder
+  voicePage() {
+    Column({space:14}) {
+      Column({space:8}){
+        Row({space:8}){
+          Text('唤醒词').fontSize(this.readableSize(13)).fontColor(SUB)
+          Text('小颐').fontSize(this.readableSize(20)).fontWeight(FontWeight.Bold).fontColor(PRIMARY)
+        }.width('100%')
+        Text('先喊“小颐”，再说要做什么。比如“小颐，开灯”“小颐，救命”。开灯、关灯、自动夜灯、求助、确认服药、报温湿度、看报警、看趋势、看设备、打开摄像头都能说。').fontSize(this.readableSize(14)).fontColor(INK).width('100%').lineHeight(this.readableLine(24))
+      }.width('100%').padding(16).backgroundColor(Color.White).borderRadius(16).alignItems(HorizontalAlign.Start)
+      Button(this.voiceBusy?'正在听，点一下结束':'开始说话',{type:ButtonType.Normal}).height(this.elderMode?64:54).width('100%').borderRadius(14).fontSize(this.readableSize(17)).backgroundColor(this.voiceBusy?AMBER:PRIMARY).fontColor(Color.White).onClick(()=>{this.listenVoice();})
+      Text(this.voiceStatus).fontSize(this.readableSize(14)).fontColor(SUB).width('100%').lineHeight(this.readableLine(21))
+      if(this.voiceHeard){Text('听到：'+this.voiceHeard).fontSize(this.readableSize(15)).fontColor(INK).width('100%').lineHeight(this.readableLine(22))}
+      if(this.voiceReply){
+        Row({space:10}){
+          Text('小颐').fontSize(this.readableSize(13)).fontColor(PRIMARY).padding({left:8,right:8,top:3,bottom:3}).backgroundColor(CareTheme.softBlue).borderRadius(8)
+          Text(this.voiceReply).fontSize(this.readableSize(15)).fontColor(INK).layoutWeight(1).lineHeight(this.readableLine(22))
+        }.width('100%').padding(14).backgroundColor(Color.White).borderRadius(14).alignItems(VerticalAlign.Top)
+      }
+      Column({space:10}){
+        Text('不方便说话时，打字一样有效').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%')
+        TextInput({text:this.voiceTyped,placeholder:'例如：小颐开灯'}).height(this.elderMode?60:48).fontSize(this.readableSize(15)).backgroundColor(Color.White).borderRadius(12).onChange((value:string)=>{this.voiceTyped=value;})
+        Button('执行这句',{type:ButtonType.Normal}).height(this.elderMode?58:46).width('100%').borderRadius(12).fontSize(this.readableSize(15)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{const line=this.voiceTyped;this.voiceTyped='';this.runVoiceText(line,false);})
+      }.width('100%').alignItems(HorizontalAlign.Start)
+      Text('可以这样说').fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%').margin({top:4})
+      Flex({wrap:FlexWrap.Wrap}){
+        ForEach(VoiceCommand.exampleList(),(line:string)=>{
+          Text(line).fontSize(this.readableSize(13)).fontColor(PRIMARY).padding({left:12,right:12,top:8,bottom:8}).backgroundColor(Color.White).borderRadius(10).margin({right:8,bottom:8}).onClick(()=>{this.runVoiceText(line,false);})
+        },(line:string)=>line)
+      }.width('100%')
+      Text('语音识别在离线引擎可用时工作；识别不准时可以重说或直接打字。控制类指令仍受账号权限与设备在线状态限制。').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
+    }.width('100%')
+  }
+  @Builder
+  incidentAccessPage() {
+    Column({space:16}){
+      this.brandHeader()
+      Text('协同守护').fontSize(this.readableSize(27)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
+      Text(this.memberRoleLabel(this.familyRole)).fontSize(this.readableSize(16)).fontColor(PRIMARY).width('100%')
+      Text(this.memberRoleNote(this.familyRole)).fontSize(this.readableSize(14)).fontColor(SUB).width('100%').lineHeight(this.readableLine(22))
+      Text(this.pushOnline?'前台实时连接已建立':'正在通过轮询同步报警').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
+      Button('查看报警与处置记录').width('100%').constraintSize({minHeight:48}).backgroundColor(PRIMARY).borderRadius(12).onClick(()=>{this.navigate(1);})
+      Button('查看账号与成员').width('100%').constraintSize({minHeight:48}).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).borderRadius(12).onClick(()=>{this.detail='members';this.refreshFamily();})
+      if(this.error){Text(this.error).fontSize(this.readableSize(13)).fontColor(AMBER).width('100%')}
     }.width('100%')
   }
   @Builder
@@ -1279,11 +1703,84 @@ struct Index {
       if(this.loggedIn&&this.familyRole==='owner'){
         Text('邀请家人一起守护').fontSize(this.readableSize(18)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
         TextInput({text:this.memberName,placeholder:'账号：3～32位字母、数字或下划线'}).fontSize(14).height(52).backgroundColor(Color.White).borderRadius(12).onChange((v:string)=>{this.memberName=v;})
-        TextInput({text:this.memberPassword,placeholder:'初始密码：至少8位'}).type(InputType.Password).fontSize(14).height(52).backgroundColor(Color.White).borderRadius(12).onChange((v:string)=>{this.memberPassword=v;})
-        Row(){Text('只查看，不控制设备').fontSize(this.readableSize(15)).fontColor(INK).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.memberReadOnly}).selectedColor(PRIMARY).onChange((v:boolean)=>{this.memberReadOnly=v;})}.width('100%')
+        TextInput({text:this.memberPassword,placeholder:'初始密码：8～128位'}).type(InputType.Password).fontSize(14).height(52).backgroundColor(Color.White).borderRadius(12).onChange((v:string)=>{this.memberPassword=v;})
+        Text('这位成员可以做什么').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
+        Row({space:10}){
+          Button('只读成员',{type:ButtonType.Normal}).layoutWeight(1).height(46).borderRadius(12).fontSize(this.readableSize(15))
+            .backgroundColor(this.memberRole==='viewer'?PRIMARY:Color.White).fontColor(this.memberRole==='viewer'?Color.White:SUB)
+            .onClick(()=>{this.memberRole='viewer';})
+          Button('照护成员',{type:ButtonType.Normal}).layoutWeight(1).height(46).borderRadius(12).fontSize(this.readableSize(15))
+            .backgroundColor(this.memberRole==='caregiver'?PRIMARY:Color.White).fontColor(this.memberRole==='caregiver'?Color.White:SUB)
+            .onClick(()=>{this.memberRole='caregiver';})
+        }.width('100%')
+        Row({space:10}){
+          Button('社区网格员',{type:ButtonType.Normal}).layoutWeight(1).height(46).borderRadius(12).fontSize(this.readableSize(14)).backgroundColor(this.memberRole==='community'?PRIMARY:Color.White).fontColor(this.memberRole==='community'?Color.White:SUB).onClick(()=>{this.memberRole='community';})
+          Button('物业值班人员',{type:ButtonType.Normal}).layoutWeight(1).height(46).borderRadius(12).fontSize(this.readableSize(14)).backgroundColor(this.memberRole==='property'?PRIMARY:Color.White).fontColor(this.memberRole==='property'?Color.White:SUB).onClick(()=>{this.memberRole='property';})
+        }.width('100%')
+        Text(this.memberRoleNote(this.memberRole)).fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
         Button(this.memberBusy?'正在创建…':'创建家庭成员', {type:ButtonType.Normal}).enabled(!this.memberBusy).backgroundColor(PRIMARY).borderRadius(12).constraintSize({minHeight:48}).width('100%').onClick(()=>{this.addMember();})
-        if(this.memberMessage){Text(this.memberMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%')}
+        if(this.memberMessage){Text(this.memberMessage).fontSize(this.readableSize(13)).fontColor(this.memberMessage.startsWith('已创建')?PRIMARY:SUB).width('100%').lineHeight(this.readableLine(20))}
+        Text('家庭管理员由家庭创建者持有，暂不能在这里再指派一位。').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
       }else{Text(this.loggedIn?'由家庭管理员邀请新成员；你的设备权限由家庭账号决定。':'登录家庭账号后，查看已授权设备与成员功能。').fontSize(this.readableSize(16)).fontColor(SUB).width('100%').lineHeight(26)}
+      if(this.loggedIn){
+        Row(){Text('家庭成员').fontSize(this.readableSize(17)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1);Text(this.members.length?this.members.length+' 个账号':'读取中…').fontSize(this.readableSize(13)).fontColor(SUB)}.width('100%').margin({top:6})
+        if(!this.members.length){
+          Text('暂时没有读取到成员列表。下拉或重新进入本页可刷新。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
+        }
+        ForEach(this.members,(member:HouseholdMember)=>{
+          Column({space:8}){
+            Row({space:8}){
+              Text(member.username).fontSize(this.readableSize(16)).fontWeight(FontWeight.Medium).fontColor(INK).layoutWeight(1)
+              Text(this.memberRoleLabel(member.role)).fontSize(this.readableSize(12)).fontColor(PRIMARY).padding({left:8,right:8,top:3,bottom:3}).backgroundColor(CareTheme.softBlue).borderRadius(8)
+            }.width('100%')
+            Row({space:6}){
+              if(member.username===this.accountName){Text('当前登录').fontSize(this.readableSize(12)).fontColor(AMBER)}
+              if(member.username===this.memberCreated){Text('刚刚创建').fontSize(this.readableSize(12)).fontColor(PRIMARY)}
+              Text(this.memberRoleNote(member.role)).fontSize(this.readableSize(12)).fontColor(SUB).layoutWeight(1)
+            }.width('100%')
+            if(member.username===this.accountName){
+              Text(this.accountStatusText()+' · '+this.api.base).fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(18))
+            }else if(this.switchUser===member.username){
+              Column({space:8}){
+                Text('输入 '+member.username+' 的密码后切换，密码不会被保存').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(18))
+                TextInput({text:this.switchPassword,placeholder:'该账号的密码'}).type(InputType.Password).height(this.elderMode?58:46).fontSize(this.readableSize(15)).backgroundColor(BG).borderRadius(12).onChange((v:string)=>{this.switchPassword=v;})
+                Row({space:8}){
+                  Button(this.switchBusy?'登录中…':'登录并切换',{type:ButtonType.Normal}).enabled(!this.switchBusy).layoutWeight(1).height(44).borderRadius(12).fontSize(this.readableSize(14)).backgroundColor(PRIMARY).onClick(()=>{this.signInSwitch();})
+                  Button('取消',{type:ButtonType.Normal}).enabled(!this.switchBusy).height(44).borderRadius(12).fontSize(this.readableSize(14)).fontColor(SUB).backgroundColor(BG).onClick(()=>{this.switchUser='';this.switchPassword='';this.switchMessage='';})
+                }.width('100%')
+              }.width('100%')
+            }else{
+              Row({space:10}){
+                Text('成员使用各自账号登录，密码不向其他成员展示').fontSize(this.readableSize(12)).fontColor(SUB).layoutWeight(1).lineHeight(this.readableLine(18))
+              }.width('100%')
+            }
+            if(this.familyRole==='owner'&&member.role!=='owner'){
+              Row({space:10}){
+                Button('修改权限',{type:ButtonType.Normal}).enabled(!this.memberBusy).constraintSize({minHeight:44}).borderRadius(10).fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.manageMember(member,false);})
+                Button('删除账号',{type:ButtonType.Normal}).enabled(!this.memberBusy).constraintSize({minHeight:44}).borderRadius(10).fontSize(this.readableSize(13)).fontColor(RED).backgroundColor(CareTheme.alarmSurface).onClick(()=>{this.manageMember(member,true);})
+              }.width('100%')
+            }
+          }.width('100%').padding(12).backgroundColor(Color.White).borderRadius(12).alignItems(HorizontalAlign.Start)
+        },(member:HouseholdMember)=>member.username)
+        if(this.localExtras().length){
+          Text('本机保存的其他账号').fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%').margin({top:4})
+          ForEach(this.localExtras(),(entry:SavedAccount)=>{
+            Row({space:10}){
+              Column({space:4}){
+                Text(entry.username).fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%')
+                Text(this.memberRoleLabel(entry.role)+' · 服务器成员列表里没有这个账号').fontSize(this.readableSize(12)).fontColor(AMBER).width('100%')
+              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+              Button(this.switchBusy?'切换中…':'切换',{type:ButtonType.Normal}).enabled(!this.switchBusy&&!this.loginBusy).height(38).borderRadius(10).fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.switchAccount(entry);})
+            }.width('100%').padding(12).backgroundColor(Color.White).borderRadius(12)
+          },(entry:SavedAccount)=>entry.server+'|'+entry.username)
+        }
+        if(this.switchMessage){Text(this.switchMessage).fontSize(this.readableSize(13)).fontColor(this.switchMessage.startsWith('已切换')?PRIMARY:AMBER).width('100%').lineHeight(this.readableLine(20))}
+        Column({space:6}){
+          Text('在另一台手机登录').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%')
+          Text('1. 安装同一版本颐鸿安 App。\n2. 服务器地址填 '+this.api.base+'。\n3. 用成员账号和初始密码登录，即可看到同一家庭的设备。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(21)).width('100%')
+        }.width('100%').padding(14).backgroundColor(BG).borderRadius(12).alignItems(HorizontalAlign.Start)
+        Button('添加其他账号',{type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).width('100%').borderRadius(12).onClick(()=>{this.userDraft='';this.passwordDraft='';this.settingsOpen=true;})
+      }
       Button('查看家庭设备', {type:ButtonType.Normal}).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).constraintSize({minHeight:48}).width('100%').borderRadius(12).onClick(()=>{this.detail='';this.navigate(3);})
     }.width('100%')
   }
@@ -1337,8 +1834,8 @@ struct Index {
     Column({space:14}) {
       Row() { Text('连接后端').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{this.settingsOpen=false;this.passwordDraft='';}) }.width('100%')
       Text('登录后查询真实设备；不会把云账号密钥放进 App。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
-      TextInput({text:this.serverDraft,placeholder:'https://backend.example.com:8443'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.serverDraft=value;})
-      Text('使用公网服务器地址').fontSize(this.readableSize(13)).fontColor(PRIMARY).width('100%').onClick(()=>{this.serverDraft='https://backend.example.com:8443';})
+      TextInput({text:this.serverDraft,placeholder:'https://backend.example.com'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.serverDraft=value;})
+      Text('使用公网服务器地址').fontSize(this.readableSize(13)).fontColor(PRIMARY).width('100%').onClick(()=>{this.serverDraft='https://backend.example.com';})
       TextInput({text:this.userDraft,placeholder:'用户名'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.userDraft=value;})
       if (this.loggedIn) { Text('本次登录密码可点右侧眼睛查看；退出或重启后清除。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%') }
       TextInput({text:this.passwordDraft,placeholder:'后端登录密码'}).type(InputType.Password).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.passwordDraft=value;})
@@ -1359,11 +1856,24 @@ struct Index {
       Text('当前终端操作：确认或消音不会删除这条事件记录。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
       this.controls()
       Text('处理备注').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
-      ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}：${note.note}`).fontSize(this.readableSize(13)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
+      if(this.selected?.claim){Text('正在处理：'+this.selected?.claim?.username).fontSize(this.readableSize(14)).fontColor(PRIMARY).width('100%')}
+      if(this.allowed('alarms.handle')){
+        Row({space:8}){
+          Button(this.claimBusy?'正在同步…':this.selected?.claim?(this.selected?.claim?.username===this.accountName?'释放认领':'释放他人认领'):'我来处理').fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).enabled(!this.claimBusy&&!this.noteSaving&&(!this.selected?.claim||this.selected?.claim?.username===this.accountName||this.familyRole==='owner')).onClick(()=>{this.claimAlarm(!!this.selected?.claim);})
+          Text('认领与处理记录不会解除设备报警').fontSize(this.readableSize(12)).fontColor(SUB).layoutWeight(1)
+        }.width('100%')
+      }else{Text('当前账号可查看记录，没有处置权限').fontSize(this.readableSize(13)).fontColor(AMBER).width('100%')}
+      ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}${note.account_deleted?'（账号已删除）':''}：${note.note}`).fontSize(this.readableSize(13)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
       Row({space:8}) { Button('已处理').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='handled'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='false_alarm'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='follow_up'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
       Text('先选择处置结果，再点击“保存处理记录”。成功后关闭详情；只保存这条事件的处理说明，不解除设备报警。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
-      TextArea({text:this.noteDraft,placeholder:'可选：补充联系家属、现场查看等处理情况…'}).maxLength(2000).enabled(!this.noteSaving).height(90).fontSize(this.readableSize(13)).backgroundColor(BG).onChange((value:string)=>{this.noteDraft=value;})
-      Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 48).width('100%').backgroundColor(PRIMARY).enabled(!this.noteSaving&&this.selected!==null).onClick(()=>{this.saveNote();})
+      if(this.allowed('alarms.handle')){
+        Row({space:8}){
+          Button('已联系社区上门',{type:ButtonType.Normal}).fontSize(this.readableSize(12)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).layoutWeight(1).enabled(!this.noteSaving).onClick(()=>{this.noteDraft='已联系社区网格员上门查看';this.resolution='follow_up';})
+          Button('已核实，老人正常',{type:ButtonType.Normal}).fontSize(this.readableSize(12)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).layoutWeight(1).enabled(!this.noteSaving).onClick(()=>{this.noteDraft='已联系老人并核实一切正常，确认为误报';this.resolution='false_alarm';})
+        }.width('100%')
+      }
+      TextArea({text:this.noteDraft,placeholder:'补充联系家属、现场查看等处理情况…'}).maxLength(2000).enabled(!this.noteSaving&&this.allowed('alarms.handle')).height(90).fontSize(this.readableSize(13)).backgroundColor(BG).onChange((value:string)=>{this.noteDraft=value;})
+      Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 48).width('100%').backgroundColor(PRIMARY).enabled(!this.noteSaving&&this.selected!==null&&this.allowed('alarms.handle')&&(!this.selected?.claim||this.selected?.claim?.username===this.accountName)).onClick(()=>{this.saveNote();})
       if(this.noteMessage){Text(this.noteMessage).fontSize(this.readableSize(13)).fontColor(this.noteMessage.indexOf('失败')>=0?RED:PRIMARY).width('100%')}
       if (this.demo) { Text('演示操作不会发送到真实设备').fontSize(this.readableSize(13)).fontColor(AMBER) }
     }.padding(22).width('100%')
@@ -1372,10 +1882,11 @@ struct Index {
   @Builder
   detailPage() {
     Column({space:16}) {
-      Row({space:8}){Button({type:ButtonType.Normal}){this.icon($r('app.media.back'),24)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.detail='';});Text(this.detail==='door'?'房门与出入记录':this.detail==='reports'?'活动报告':this.detail==='activity'?'人体活动':this.detail==='members'?'家庭成员':this.detail==='diagnostics'?'技术诊断':'守护说明').fontSize(this.readableSize(24)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1)}.width('100%')
+      Row({space:8}){Button({type:ButtonType.Normal}){this.icon($r('app.media.back'),24)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.detail='';});Text(this.detail==='door'?'房门与出入记录':this.detail==='reports'?'活动报告':this.detail==='activity'?'人体活动':this.detail==='members'?'家庭成员':this.detail==='voice'?'语音助手':this.detail==='diagnostics'?'技术诊断':'守护说明').fontSize(this.readableSize(24)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1)}.width('100%')
       if(this.detail==='door'){this.doorHistory();Button('查看房间节点').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:48}).width('100%').onClick(()=>{router.pushUrl({url:'pages/Nodes',params:{kind:'environment'}});});}
       else if(this.detail==='reports'){this.activityReports();}
       else if(this.detail==='members'){this.familyMembers();}
+      else if(this.detail==='voice'){this.voicePage();}
       else if(this.detail==='diagnostics'){this.diagnostics();}
       else {
         this.assessmentCard()
@@ -1398,7 +1909,7 @@ struct Index {
       Column() {
         if (this.demo || this.simulated) { Text(this.demo?'演示环境 · 所有数据仅用于展示':'模拟后端 · 非真实设备数据').fontSize(this.readableSize(13)).fontColor(CareTheme.warmInk).width('100%').textAlign(TextAlign.Center).padding({top:5,bottom:5}).backgroundColor(CareTheme.warmSurface) }
         Scroll(this.pageScroller) {
-          Column() { if(this.detail){this.detailPage()} else if(this.tab===0){this.overview()} else if(this.tab===1){this.alarmsPage()} else if(this.tab===2){this.trendsPage()} else if(this.tab===3){this.devicePage()} else {this.userPage()} }.padding({left:20,right:20,bottom:24}).width('100%')
+          Column() { if(this.detail){this.detailPage()} else if(this.loggedIn&&!this.allowed('view')&&this.tab!==1&&this.tab!==4){this.incidentAccessPage()} else if(this.tab===0){this.overview()} else if(this.tab===1){this.alarmsPage()} else if(this.tab===2){this.trendsPage()} else if(this.tab===3){this.devicePage()} else {this.userPage()} }.padding({left:20,right:20,bottom:24}).width('100%')
         }.layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off).width('100%')
         if(!this.detail){Row() { this.navItem(0,$r('app.media.home'),'守护'); this.navItem(1,$r('app.media.bell'),'报警'); this.navItem(2,$r('app.media.chart'),'趋势'); this.navItem(3,$r('app.media.device'),'设备'); this.navItem(4,$r('app.media.user'),'我的') }.width('100%').padding({left:12,right:12,top:4,bottom:12}).backgroundColor(Color.White).border({width:{top:0.5},color:CareTheme.line})}
       }.width('100%').height('100%').backgroundColor(BG).padding({top:0,bottom:0})

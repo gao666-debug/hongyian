@@ -2,6 +2,7 @@
   "src": [
     "pages/Index",
     "pages/Camera",
-    "pages/Nodes"
+    "pages/Nodes",
+    "pages/Messages"
   ]
 }

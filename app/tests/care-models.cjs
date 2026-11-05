@@ -119,3 +119,15 @@ assert.equal(nightLabel({...manualLamp,night_on:false,light_mode:0},true),'手�
 assert.equal(nightLabel({...manualLamp,light_owner:'alarm'},true),'报警灯优先');
 assert.equal(nightLabel(manualLamp,false),'状态待更新');
 console.log('PASS manual night-light labels, priority and stale reading');
+{
+const matches=load('Living').livingCommandMatches;
+const plan={night_auto:true,medicine_enabled:false,medicine_minute:480,medicine_enabled_2:false,medicine_minute_2:720,medicine_enabled_3:false,medicine_minute_3:1200,expected_revision:22};
+const savedPlan={schema:2,config_revision:23,night_auto:true,slots:[{slot:0,enabled:false,minute:480,state:0},{slot:1,enabled:false,minute:720,state:0},{slot:2,enabled:false,minute:1200,state:0}]};
+assert(matches(savedPlan,'set_medicine_plan',plan));
+assert(!matches({...savedPlan,config_revision:22},'set_medicine_plan',plan),'old report must not confirm save');
+assert(!matches({...savedPlan,slots:savedPlan.slots.map((s,i)=>i===1?{...s,enabled:true}:s)},'set_medicine_plan',plan),'each disabled dose must match');
+assert(matches({...savedPlan,light_mode:0,light_owner:'alarm'},'set_light',{mode:0}),'lamp policy can be off while alarm owns LED');
+assert(!matches({...savedPlan,light_mode:1},'set_light',{mode:0}));
+console.log('PASS living command/report agreement: revision, all three disabled doses and light policy');
+
+}

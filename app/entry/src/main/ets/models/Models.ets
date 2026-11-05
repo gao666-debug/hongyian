@@ -1,6 +1,10 @@
 import { DistributedNode } from './Distributed';
-export interface Envelope { code: number; message: string; data?: object; mode?: string; simulated?: boolean; }
-export interface LoginData { access_token: string; device_ids?: string[]; devices?: DistributedNode[]; }
+export interface Envelope { code: number; message: string; detail?: string; data?: object; mode?: string; simulated?: boolean; }
+export function backendErrorMessage(status: number, envelope: Envelope): string {
+  if (status === 429) { return '登录尝试过于频繁，请稍后重试；同一网络下多个账号共用登录限额'; }
+  return envelope.message || envelope.detail || `请求失败 ${status}`;
+}
+export interface LoginData { access_token: string; device_ids?: string[]; devices?: DistributedNode[]; expires_in?: number; username?: string; }
 export interface Properties {
   temp?: number; humi?: number; gas?: number; light?: number; body?: number; inactive?: number;
   alarm?: number; status?: number; help?: number; fall?: number; gas_alarm?: number; smoke?: number; door?: number;
@@ -25,11 +29,12 @@ export interface Health {
   door_enabled?: number; door_valid?: number; wireless_btn_enabled?: number; data_state?: string; data_stale?: boolean;
   env_available?: boolean; fall_detection_available?: boolean; time_synced?: boolean;
 }
-export interface Handling { resolution: string; username: string; created: number; }
-export interface AlarmEvent { source?: string; source_device_id?: string; handling?: Handling; boot_id: number; event_id: number; code: number; phase: string; epoch: number; up: number; duration: number; value: number; }
+export interface Handling { resolution: string; username: string; created: number; account_deleted?: boolean; }
+export interface AlarmClaim { username: string; created: number; }
+export interface AlarmEvent { source?: string; source_device_id?: string; handling?: Handling; claim?: AlarmClaim; boot_id: number; event_id: number; code: number; phase: string; epoch: number; up: number; duration: number; value: number; }
 export interface AlarmList { items: AlarmEvent[]; }
 export interface Note { note: string; resolution: string; }
-export interface NoteItem { note: string; resolution: string; username?: string; created?: string; }
+export interface NoteItem { note: string; resolution: string; username?: string; created?: string; account_deleted?: boolean; }
 export interface NoteList { items: NoteItem[]; }
 export interface Command { command_id: string; state: string; result_code?: number; }
 export interface AppSOSResult extends AlarmEvent { device_command?: Command; }

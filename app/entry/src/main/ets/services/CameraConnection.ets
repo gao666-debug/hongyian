@@ -41,7 +41,7 @@ export class CameraConnection {
         // Arduino ESP32 WebServer skips one character after the header colon.
         // Explicit optional whitespace keeps Basic authentication compatible with its parser.
         header:{'Authorization':' Basic '+basic,'Cache-Control':'no-store'},
-        usingProtocol:http.HttpProtocol.HTTP1_1,usingCache:false,usingProxy:false,connectTimeout:3000,readTimeout:6000,expectDataType:http.HttpDataType.STRING
+        usingProtocol:http.HttpProtocol.HTTP1_1,usingCache:false,usingProxy:false,connectTimeout:1500,readTimeout:6000,expectDataType:http.HttpDataType.STRING
       });
       if (response.responseCode===401) { throw new Error('摄像头账号或密码不正确'); }
       if (response.responseCode!==200) { throw new Error('摄像头暂时无法响应'); }
@@ -66,7 +66,10 @@ export class CameraConnection {
     if (initial) { return initial; }
     const prefixes:string[]=[];
     try {
-      const net=await connection.getDefaultNet();
+      const nets=await connection.getAllNets();
+      for(const net of nets) {
+      const capability=await connection.getNetCapabilities(net);
+      if(!capability.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)){continue;}
       const properties=await connection.getConnectionProperties(net);
       for (const link of properties.linkAddresses) {
         const ip=link.address.address;
@@ -76,14 +79,15 @@ export class CameraConnection {
           if (!prefixes.includes(prefix)) { prefixes.push(prefix); }
         }
       }
-    } catch (error) { throw new Error('未找到摄像头，请连接 GB 热点后重试，或在连接设置中填入地址'); }
+      }
+    } catch (error) { throw new Error('未找到摄像头，请连接摄像头所在 Wi-Fi 后重试，或在连接设置中填入地址'); }
     // Two interfaces at most; stop immediately on success or page exit.
     for (const prefix of prefixes.slice(0,2)) {
-      for (let start=1; start<=254; start+=12) {
+      for (let start=1; start<=254; start+=32) {
         if (generation!==this.generation) { throw new Error('连接已取消'); }
-        progress('正在查找同一网络的摄像头 '+Math.min(start+11,254)+'/254');
+        progress('正在查找同一网络的摄像头 '+Math.min(start+31,254)+'/254');
         const addresses:string[]=[];
-        for (let host=start; host<start+12 && host<=254; host++) { addresses.push('http://'+prefix+'.'+host); }
+        for (let host=start; host<start+32 && host<=254; host++) { addresses.push('http://'+prefix+'.'+host); }
         const found=await this.batch(addresses,username,password);
         if (generation!==this.generation) { throw new Error('连接已取消'); }
         if (found) { return found; }
@@ -92,12 +96,14 @@ export class CameraConnection {
     throw new Error('没有找到就绪的摄像头。请确认摄像头通电、连接同一热点，且账号密码正确');
   }
   private async batch(addresses:string[], username:string, password:string): Promise<CameraFound | null> {
-    const results=await Promise.all(addresses.map(async (address:string):Promise<CameraFound | null>=>{
-      try { return await this.probe(address,username,password); } catch (error) {
-        return null;
-      }
-    }));
-    for (const result of results) { if (result) { return result; } }
-    return null;
+    if(!addresses.length){return null;}
+    return new Promise<CameraFound | null>((resolve)=>{
+      let left=addresses.length;let done=false;
+      addresses.forEach((address:string)=>{
+        this.probe(address,username,password).then((result:CameraFound)=>{
+          if(!done){done=true;resolve(result);}
+        }).catch(()=>{}).finally(()=>{left--;if(!left&&!done){done=true;resolve(null);}});
+      });
+    });
   }
 }

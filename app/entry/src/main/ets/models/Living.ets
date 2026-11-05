@@ -61,3 +61,20 @@ export function demoLivingUpdate(current: LivingStatus, name: string, paras: Com
   const night=paras.night_auto!==undefined?paras.night_auto:current.night_auto;
   return {schema:current.schema,config_revision:current.config_revision+((name==='set_living'||name==='set_medicine_plan')?1:0),night_auto:night,night_on:night&&light<30&&!pending,light_valid:true,light_owner:pending?'medicine':night&&light<30?'night':'off',medicine_enabled:slots[0].enabled,medicine_minute:slots[0].minute,medicine_state:slots[0].state,dose_day:day,confirmed_epoch:slots[0].confirmed_epoch,time_synced:true,medicine_revision:revision,slots:slots};
 }
+
+// Execution receipts acknowledge the command; only a matching report confirms its visible state.
+export function livingCommandMatches(s: LivingStatus | null, name: string, p: CommandParameters): boolean {
+  if (!s) { return false; }
+  if (name === 'set_light') { return s.light_mode === p.mode; }
+  if (name === 'set_living' || name === 'set_medicine_plan') {
+    if (s.config_revision <= (p.expected_revision || 0) || s.night_auto !== p.night_auto) { return false; }
+    const slots=medicineSlots(s);
+    if (!slots.length || slots[0].enabled !== p.medicine_enabled || slots[0].minute !== p.medicine_minute) { return false; }
+    return name !== 'set_medicine_plan' || slots.length === 3 && slots[1].enabled === p.medicine_enabled_2 && slots[1].minute === p.medicine_minute_2 && slots[2].enabled === p.medicine_enabled_3 && slots[2].minute === p.medicine_minute_3;
+  }
+  if (name === 'confirm_medicine' || name === 'set_medicine_state') {
+    const slot=medicineSlots(s).find((row:MedicineSlot)=>row.slot === (p.slot || 0));
+    return s.dose_day === p.dose_day && !!slot && (p.taken === false ? slot.state !== 4 : slot.state === 4);
+  }
+  return false;
+}
