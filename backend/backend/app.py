@@ -123,14 +123,28 @@ class Stats(BaseModel):
 
 class Hub:
     def __init__(self):
+        # 两种订阅维度并存：设备事件推给「订阅了这台设备」的连接，
+        # 聊天消息推给「这个账号」的所有连接（同一账号可能多台手机）。
         self.clients = defaultdict(set)
+        self.users = defaultdict(set)
+
+    @staticmethod
+    def _push(queue, event, resync):
+        if queue.full():
+            while not queue.empty(): queue.get_nowait()
+            queue.put_nowait(resync)
+        else:
+            queue.put_nowait(event)
+
     async def publish(self, device, event):
         for queue in tuple(self.clients[device]):
-            if queue.full():
-                while not queue.empty(): queue.get_nowait()
-                queue.put_nowait({'type':'resync_required','device_id':device,'timestamp':utc()})
-            else:
-                queue.put_nowait(event)
+            # 设备事件的 resync 事件保留 device_id，App 靠它判断哪台设备要重拉
+            self._push(queue, event,
+                       {'type':'resync_required','device_id':device,'timestamp':utc()})
+
+    async def publish_user(self, username, event):
+        for queue in tuple(self.users[username]):
+            self._push(queue, event, {'type':'resync_required','timestamp':utc()})
 
 
 def create_app(settings=None, cloud=None):
@@ -228,7 +242,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.8.2',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.9.1',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -248,9 +262,20 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.8.2','camera_transport':'jpeg-relay'})
+                         'api_version':'1.9.1','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
+
+    # 账号间消息：好友、会话（单聊/群聊）、媒体。推送走 hub.users（账号维度），
+    # 与设备事件的 hub.clients（设备维度）互不干扰。
+    from .messaging import Messaging
+    chats = Messaging(store, settings)
+    app.state.chats = chats
+
+    async def notify_user(username, event):
+        await hub.publish_user(username, event)
+
+    chats.install(app, session, envelope, notify_user)
     from .camera import CameraService
     cameras = CameraService(store, settings, homes)
     cameras.install(app, session, envelope)
@@ -479,15 +504,19 @@ def create_app(settings=None, cloud=None):
         if device_id not in homes.configured_ids():
             await ws.close(code=4404); return
         grant = store.consume_ticket(ticket,device_id)
-        if not grant or not store.session(grant['session_hash']):
+        sess = store.session(grant['session_hash']) if grant else None
+        if not sess:
             await ws.close(code=4401); return
+        ws_user = sess['username']
         try:
-            homes.authorize(store.session(grant['session_hash'])['username'],device_id)
+            homes.authorize(ws_user,device_id)
         except HTTPException:
             await ws.close(code=4403); return
         await ws.accept()
         queue = asyncio.Queue(maxsize=100)
         hub.clients[device_id].add(queue)
+        # 同一条连接同时订阅本账号：这样聊天消息不用另开 WebSocket
+        hub.users[ws_user].add(queue)
         await ws.send_json({'schema':1,'type':'hello','device_id':device_id,'timestamp':utc(),
                            'mode':settings.mode,'simulated':settings.mode=='mock'})
         async def sender():
@@ -496,6 +525,11 @@ def create_app(settings=None, cloud=None):
                     await ws.close(code=4401); return
                 try: event=await asyncio.wait_for(queue.get(),timeout=15)
                 except asyncio.TimeoutError: event={'type':'ping','timestamp':utc()}
+                if not store.session(grant['session_hash']):
+                    await ws.close(code=4401); return
+                if event.get('type') == 'message':
+                    try: chats.require_member(event.get('conversation_id'), ws_user)
+                    except HTTPException: continue
                 await ws.send_json(event)
                 if event['type']=='resync_required':
                     await ws.close(code=1013); return
@@ -510,11 +544,14 @@ def create_app(settings=None, cloud=None):
             done,pending=await asyncio.wait([send_task,receive_task],return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try: task.result()
-                except (WebSocketDisconnect,RuntimeError): pass
+                except (WebSocketDisconnect,RuntimeError,asyncio.CancelledError): pass
         finally:
             send_task.cancel(); receive_task.cancel()
-            await asyncio.gather(send_task,receive_task,return_exceptions=True)
+            import anyio
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(send_task,receive_task,return_exceptions=True)
             hub.clients[device_id].discard(queue)
+            hub.users[ws_user].discard(queue)
 
     async def ingest_nearlink(device,payload):
         services=payload.get('services') or [payload]
