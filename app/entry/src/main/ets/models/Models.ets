@@ -32,6 +32,7 @@ export interface Note { note: string; resolution: string; }
 export interface NoteItem { note: string; resolution: string; username?: string; created?: string; }
 export interface NoteList { items: NoteItem[]; }
 export interface Command { command_id: string; state: string; result_code?: number; }
+export interface AppSOSResult extends AlarmEvent { device_command?: Command; }
 export interface Ticket { ticket: string; }
 export interface Push { type: string; data?: object; }
 export interface DayStats { date: string; activity_total: number; alarm_total: number; activity_by_hour: number[]; }

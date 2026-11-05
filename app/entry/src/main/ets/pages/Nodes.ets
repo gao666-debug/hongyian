@@ -154,7 +154,7 @@ struct Nodes {
       Image($$.symbol).width(23).height(23).objectFit(ImageFit.Contain)
       Text($$.label).fontSize(13).fontColor(CareTheme.secondary)
       Text($$.value).fontSize(25).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink).maxLines(1).minFontSize(16).maxFontSize(25)
-      Text($$.unit).fontSize(11).fontColor(CareTheme.secondary)
+      Text($$.unit).fontSize(13).fontColor(CareTheme.secondary)
     }.padding({top:20,bottom:20,left:8,right:8}).layoutWeight(1).backgroundColor(Color.White).borderRadius(16)
   }
   @Builder
@@ -186,14 +186,14 @@ struct Nodes {
       }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(16)
       if (this.environmentError) { Text(this.environmentError).fontSize(13).fontColor(CareTheme.warmInk).width('100%') }
       Text('光照与烟雾目前是传感器原始电压，不等同于照度或烟雾浓度；不据此给出安全结论。PIR 检测活动，不能确认静止人员是否在场。')
-        .fontSize(12).fontColor(CareTheme.secondary).lineHeight(21).width('100%')
-      Text('设备 ' + this.environmentId).fontSize(10).fontColor(CareTheme.secondary).width('100%').wordBreak(WordBreak.BREAK_ALL)
+        .fontSize(13).fontColor(CareTheme.secondary).lineHeight(21).width('100%')
+      Text('设备 ' + this.environmentId).fontSize(13).fontColor(CareTheme.secondary).width('100%').wordBreak(WordBreak.BREAK_ALL)
     } else {
       Column({space:12}) {
         Image($r('app.media.device')).width(40).height(40)
         Text('环境节点尚未绑定').fontSize(20).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink)
         Text('后端登录返回的设备清单中需要包含星闪环境节点，且当前账号具有查看权限。').fontSize(14).fontColor(CareTheme.secondary).lineHeight(23)
-      }.padding(24).width('100%').backgroundColor(Color.White).borderRadius(18)
+      }.padding(24).width('100%').backgroundColor(Color.White).borderRadius(16)
     }
   }
   @Builder
@@ -210,36 +210,36 @@ struct Nodes {
       this.information({label:'累计判定次数',value:this.watch ? sensorText(this.watch.fall_count,' 次') : '待上报'})
       this.information({label:'活动强度',value:this.watch ? sensorText(this.watch.dynamic_mg,' mg') : '待上报'})
       Text('设备没有测到心率或血氧时显示“待测量”。步数为设备累计值，重启可能归零；跌倒结果需要人工联系核实。')
-        .fontSize(12).fontColor(CareTheme.secondary).lineHeight(21).width('100%').padding({top:12,bottom:16})
+        .fontSize(13).fontColor(CareTheme.secondary).lineHeight(21).width('100%').padding({top:12,bottom:16})
     }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(16)
-    Row() { Text('心率小时趋势').fontSize(19).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink); Blank(); Text('最近 12 桶').fontSize(12).fontColor(CareTheme.secondary) }.width('100%')
+    Row() { Text('心率小时趋势').fontSize(19).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink); Blank(); Text('最近 12 桶').fontSize(13).fontColor(CareTheme.secondary) }.width('100%')
     if (this.hours.length) {
       Scroll() {
         Row({space:12}) {
           ForEach(this.hours,(hour: WearHour) => {
             Column({space:7}) {
-              Text(this.hourlyText(hour)).fontSize(11).fontColor(CareTheme.primary)
+              Text(this.hourlyText(hour)).fontSize(13).fontColor(CareTheme.primary)
               Column() { Blank(); Rect().fill(hour.hr && hour.hr.n ? CareTheme.primary : CareTheme.line).width(17).height(this.barHeight(hour)).radius(4) }.height(112)
-              Text(hourLabel(hour.hour)).fontSize(10).fontColor(CareTheme.secondary)
-              Text('+' + sensorText(hour.steps_delta,'')).fontSize(10).fontColor(CareTheme.secondary)
+              Text(hourLabel(hour.hour)).fontSize(13).fontColor(CareTheme.secondary)
+              Text('+' + sensorText(hour.steps_delta,'')).fontSize(13).fontColor(CareTheme.secondary)
             }.width(38)
           },(hour: WearHour) => hour.hour + ':' + (hour.hr ? hour.hr.avg : '') + ':' + hour.steps_delta)
         }.padding(16)
       }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%').backgroundColor(Color.White).borderRadius(16)
-      Text('上方为有效心率均值，下方为该小时步数增量；没有测量的时段不补零。').fontSize(11).fontColor(CareTheme.secondary).width('100%')
+      Text('上方为有效心率均值，下方为该小时步数增量；没有测量的时段不补零。').fontSize(13).fontColor(CareTheme.secondary).width('100%')
     } else { Text(this.hoursError || '还没有小时统计，真实上报后会自动出现。').fontSize(13).fontColor(CareTheme.secondary).padding(20).width('100%').backgroundColor(Color.White).borderRadius(16) }
     Text('跌倒判定记录').fontSize(19).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink).width('100%')
     Column() {
       ForEach(this.falls,(fall: WearFall) => {
         Column({space:6}) {
           Text('疑似跌倒 · 第 ' + fall.fall_count + ' 次').fontSize(15).fontColor(CareTheme.alarm).width('100%')
-          Text(this.timeText(fall.detected_at)).fontSize(12).fontColor(CareTheme.secondary).width('100%')
-          Text('当时心率 ' + watchVital(fall.heart_rate,' 次/分',240) + ' · 血氧 ' + watchVital(fall.spo2,' %',100)).fontSize(12).fontColor(CareTheme.secondary).width('100%')
+          Text(this.timeText(fall.detected_at)).fontSize(13).fontColor(CareTheme.secondary).width('100%')
+          Text('当时心率 ' + watchVital(fall.heart_rate,' 次/分',240) + ' · 血氧 ' + watchVital(fall.spo2,' %',100)).fontSize(13).fontColor(CareTheme.secondary).width('100%')
         }.padding({top:15,bottom:15}).width('100%').border({width:{bottom:0.5},color:CareTheme.line})
       },(fall: WearFall) => fall.key || fall.detected_at + ':' + fall.fall_count)
       if (!this.falls.length) { Text(this.fallsError || '暂无跌倒判定记录').fontSize(13).fontColor(CareTheme.secondary).padding({top:20,bottom:20}).width('100%') }
     }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(16)
-    Text('此处展示手表原始判定记录。统一报警处理与抓拍联动尚未接通，查看记录不会解除手表报警。').fontSize(12).fontColor(CareTheme.secondary).lineHeight(21).width('100%')
+    Text('此处展示手表原始判定记录。统一报警处理与抓拍联动尚未接通，查看记录不会解除手表报警。').fontSize(13).fontColor(CareTheme.secondary).lineHeight(21).width('100%')
   }
   build() {
     Column() {
@@ -258,16 +258,16 @@ struct Nodes {
             Button('随身手表').layoutWeight(1).fontSize(15).backgroundColor(this.mode === 'wearable' ? CareTheme.primary : Color.White).fontColor(this.mode === 'wearable' ? Color.White : CareTheme.primary).onClick(() => { this.selectMode('wearable'); })
           }.width('100%')
           if (!this.authenticated) {
-            Text('请返回“设备 → 连接后端服务”登录，再查看真实节点数据。这里不会用演示值代替实测。').fontSize(15).fontColor(CareTheme.secondary).lineHeight(25).padding(24).backgroundColor(Color.White).borderRadius(18)
+            Text('请返回“设备 → 连接后端服务”登录，再查看真实节点数据。这里不会用演示值代替实测。').fontSize(15).fontColor(CareTheme.secondary).lineHeight(25).padding(24).backgroundColor(Color.White).borderRadius(16)
           } else {
             Row({space:8}) {
               Circle().fill(readingFresh(this.stamp(),this.now) ? CareTheme.primary : CareTheme.warmInk).width(7).height(7)
-              Text(reportAge(this.stamp(),this.now)).fontSize(12).fontColor(CareTheme.secondary).layoutWeight(1)
-              Button(this.busy ? '读取中' : '刷新').fontSize(12).fontColor(CareTheme.primary).backgroundColor(Color.Transparent).enabled(!this.busy).onClick(() => { this.refresh(); })
+              Text(reportAge(this.stamp(),this.now)).fontSize(13).fontColor(CareTheme.secondary).layoutWeight(1)
+              Button(this.busy ? '读取中' : '刷新').fontSize(13).fontColor(CareTheme.primary).backgroundColor(Color.Transparent).enabled(!this.busy).onClick(() => { this.refresh(); })
             }.width('100%')
             if (this.mode === 'wearable') { this.wearableView() } else { this.environmentView() }
-            Text('前台每 6 秒查询 · 新读数取决于设备上报周期').fontSize(11).fontColor(CareTheme.secondary).width('100%')
-            Text(this.catalogMessage).fontSize(11).fontColor(CareTheme.secondary).width('100%')
+            Text('前台每 6 秒查询 · 新读数取决于设备上报周期').fontSize(13).fontColor(CareTheme.secondary).width('100%')
+            Text(this.catalogMessage).fontSize(13).fontColor(CareTheme.secondary).width('100%')
           }
         }.padding({left:22,right:22,top:12,bottom:32}).width('100%')
       }.layoutWeight(1).width('100%').scrollBar(BarState.Off)

@@ -629,7 +629,7 @@ static void test_wifi_backup(void)
 {
     sta = 0; wifi_attempts = 0; wifi_success_at = 2;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
-    assert(!strcmp(wifi_selected, "Mate 80 Pro"));
+    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 1);
@@ -637,7 +637,7 @@ static void test_wifi_backup(void)
     assert(mqtt_connect_wifi() == -1 && wifi_attempts == 3);
     sta = 0; wifi_attempts = 0; wifi_success_at = 3;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
-    assert(!strcmp(wifi_selected, "lumine"));
+    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
     sta = 1;
     wifi_current = 2; wifi_recoveries = cloud_failures = 0; wifi_recovery_started = false;
@@ -645,7 +645,7 @@ static void test_wifi_backup(void)
     assert(sta == 1);
     wifi_cloud_failed(4000); assert(wifi_first == 2 && wifi_recoveries == 1);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
-    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "lumine"));
+    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
     wifi_cloud_failed(5000); wifi_cloud_failed(6000); wifi_cloud_failed(7000); wifi_cloud_failed(8000);
     assert(wifi_recoveries == 1); /* no rapid reconnect storm */
     wifi_cloud_failed(124000); assert(wifi_first == 0 && wifi_recoveries == 2);
@@ -654,7 +654,7 @@ static void test_wifi_backup(void)
     wifi_cloud_ok(); assert(cloud_failures == 0 && wifi_recoveries == 0);
     wifi_first = 0; sta = 1;
     puts("PASS cloud failure recovery: threshold, cooldown, current refresh, alternate rotation");
-    puts("PASS three hotspots including lumine, existing link preservation, all unavailable");
+    puts("PASS three hotspots including CONFIGURE_LOCALLY, existing link preservation, all unavailable");
 }
 static void test_cloud_commands(void)
 {
@@ -687,6 +687,23 @@ static void test_cloud_commands(void)
     cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=abc-3", mute, strlen(mute));
     assert(safety_command_take(&cmd) && cmd.code == SAFETY_CMD_MUTE); safety_command_done(&cmd, 0);
     assert(cloud_response_next(topic, sizeof(topic), response, sizeof(response), &slot) == 1); cloud_response_sent(slot);
+    const char *sos = "{\"service_id\":\"HomeSafety\",\"command_name\":\"sos\",\"paras\":{}}";
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=sos-one", sos, strlen(sos));
+    assert(safety_command_take(&cmd) && cmd.code == SAFETY_CMD_SOS);
+    safety_command_done(&cmd,0);
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1 && strstr(response,"\"result_code\":0"));cloud_response_sent(slot);
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=sos-one", sos, strlen(sos));
+    assert(!safety_command_take(&other));
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1);cloud_response_sent(slot);
+    const char *bad_sos = "{\"service_id\":\"Other\",\"command_name\":\"sos\",\"paras\":{}}";
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=sos-bad", bad_sos, strlen(bad_sos));
+    assert(!safety_command_take(&other));
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1 && strstr(response,"\"result_code\":1"));cloud_response_sent(slot);
+    const char *bad_sos_paras = "{\"service_id\":\"HomeSafety\",\"command_name\":\"sos\",\"paras\":{\"on\":1}}";
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=sos-bad-paras", bad_sos_paras, strlen(bad_sos_paras));
+    assert(!safety_command_take(&other));
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1 && strstr(response,"\"result_code\":1"));cloud_response_sent(slot);
+    puts("PASS remote SOS: empty parameters, service validation, executed receipt and duplicate request suppression");
     const char *living="{\"service_id\":\"HomeSafety\",\"command_name\":\"set_living\",\"paras\":{\"night_auto\":true,\"medicine_enabled\":true,\"medicine_minute\":480,\"expected_revision\":1}}";
     cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=life-1",living,strlen(living));
     assert(safety_command_take(&cmd) && cmd.code==SAFETY_CMD_LIVING);

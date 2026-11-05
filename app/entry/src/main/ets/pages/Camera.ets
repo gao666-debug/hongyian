@@ -235,7 +235,7 @@ struct HomeCameraPage {
         Column({space:10}) {
           if(this.frame){Image(this.frame).objectFit(ImageFit.Contain).width('100%').layoutWeight(1)}
           else{Blank();Text('正在加载实时画面…').fontColor(CareTheme.secondary);Blank();}
-          Text(this.recording?'● 录像中 · 最长 60 秒':this.smooth?'连续视频 · 中断自动重连':'省流取图 · 中断自动重试').fontSize(12).fontColor(CareTheme.secondary).margin(12)
+          Text(this.recording?'● 录像中 · 最长 60 秒':this.smooth?'连续视频 · 中断自动重连':'省流取图 · 中断自动重试').fontSize(13).fontColor(CareTheme.secondary).margin(12)
         }.layoutWeight(1).width('100%').backgroundColor(Color.White).borderRadius(16)
       } else {
         Column({space:18}) {
@@ -254,7 +254,7 @@ struct HomeCameraPage {
         }.width('100%')
       }
       if(this.clipReady){Button('保存录像（AVI）').enabled(!this.saving).fontSize(13).onClick(()=>{this.saveMedia(true);})}
-      if(this.mediaMessage){Text(this.mediaMessage).fontSize(12).fontColor(CareTheme.secondary)}
+      if(this.mediaMessage){Text(this.mediaMessage).fontSize(13).fontColor(CareTheme.secondary)}
       Row({space:10}) {
         Button(this.busy?'连接中…':this.source?'重新连接':'一键连接摄像头').enabled(!this.busy).height(48).layoutWeight(1).backgroundColor(CareTheme.primary).fontSize(15).onClick(()=>{this.connect();})
         if(this.busy||this.source){Button(this.busy?'取消':'停止').height(48).fontSize(14).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).onClick(()=>{this.stop();})}
@@ -270,7 +270,7 @@ struct HomeCameraPage {
           Button('使用此地址连接').enabled(!this.busy).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{this.connect(true);})
         }.width('100%')
       }
-      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':'同一局域网直连 · 退出页面停止加载').fontSize(11).fontColor(CareTheme.secondary).margin({bottom:8})
+      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':'同一局域网直连 · 退出页面停止加载').fontSize(13).fontColor(CareTheme.secondary).margin({bottom:8})
     }.padding({left:20,right:20,top:12,bottom:18}).width('100%').height('100%').backgroundColor(CareTheme.background)
   }
 }

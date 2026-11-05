@@ -127,6 +127,28 @@ if __name__=='__main__': unittest.main(verbosity=2)
 class AppSOSAndBatchTests(unittest.TestCase):
     setUp=BackendTests.setUp
     tearDown=BackendTests.tearDown
+    def test_sos_device_command_opt_in_receipt_and_dedup(self):
+        path='/api/v1/devices/'+self.device
+        body={'client_request_id':'audible-one','activate_device':True}
+        first=self.client.post(path+'/sos',headers=self.auth,json=body)
+        self.assertEqual(first.status_code,201)
+        data=first.json()['data']
+        self.assertEqual(data['device_command']['command_name'],'sos')
+        again=self.client.post(path+'/sos',headers=self.auth,json=body).json()['data']
+        self.assertEqual(data['event_id'],again['event_id'])
+        self.assertEqual(data['device_command']['command_id'],again['device_command']['command_id'])
+        time.sleep(0.25)
+        receipt=self.client.get('/api/v1/commands/'+data['device_command']['command_id'],headers=self.auth).json()['data']
+        self.assertEqual((receipt['state'],receipt['result_code']),('executed',0))
+        shadow=self.client.get(path+'/shadow',headers=self.auth).json()['data']['properties']
+        self.assertEqual((shadow['help'],shadow['status'],shadow['alarm']),(1,1,1))
+        self.assertEqual(self.client.get(path+'/health',headers=self.auth).json()['data']['mute'],0)
+        legacy=self.client.post(path+'/sos',headers=self.auth,json={'client_request_id':'legacy-event'}).json()['data']
+        self.assertNotIn('device_command',legacy)
+        invalid={'device_id':self.device,'service_id':'HomeSafety','command_name':'sos','paras':{'on':1},'client_request_id':'bad-sos'}
+        self.assertEqual(self.client.post('/api/v1/commands',headers=self.auth,json=invalid).status_code,422)
+        self.assertEqual(self.client.post(path+'/sos',json=body).status_code,401)
+
     def test_sos_retry_and_batch_idempotency(self):
         path='/api/v1/devices/'+self.device
         self.assertEqual(self.client.post(path+'/sos',json={'client_request_id':'one'}).status_code,401)
