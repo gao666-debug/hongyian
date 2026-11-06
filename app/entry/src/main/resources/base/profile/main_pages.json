@@ -3,6 +3,9 @@
     "pages/Index",
     "pages/Camera",
     "pages/Nodes",
-    "pages/Messages"
+    "pages/Messages",
+    "pages/AccountCenter",
+    "pages/DeviceContact",
+    "pages/LocalControl"
   ]
 }

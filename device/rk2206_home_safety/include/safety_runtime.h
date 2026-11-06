@@ -3,7 +3,7 @@
 #define SAFETY_RUNTIME_H
 #include <stdbool.h>
 #include <stdint.h>
-#define SAFETY_FW "v3.5.51"
+#define SAFETY_FW "v3.5.57"
 #define SAFETY_CMD_ACK 1
 #define SAFETY_CMD_MUTE 2
 #define SAFETY_CMD_LIVING 3
@@ -12,6 +12,9 @@
 #define SAFETY_CMD_MEDICINE_STATE 6
 #define SAFETY_CMD_LIGHT 7
 #define SAFETY_CMD_SOS 8
+/* 解除静音（语音“取消静音”用）；不影响报警状态本身。 */
+#define SAFETY_CMD_UNMUTE 9
+#define SAFETY_CMD_CONTACT 10
 #define SAFETY_EVENT_COUNT 16
 /* Locks are created before any application task starts. */
 int safety_runtime_init(void);

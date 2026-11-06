@@ -1,3 +1,5 @@
+#include "local_access.h"
+#include "care_policy.h"
 #include "home_safety.h"
 #include "safety_runtime.h"
 #include "safety_stats.h"
@@ -248,7 +250,7 @@ static void *serve(void *arg)
     close(fd);
     return NULL;
 }
-static cJSON *request(const char *req, int expect)
+static cJSON *request_raw(const char *req, int expect)
 {
     int fds[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -259,7 +261,7 @@ static cJSON *request(const char *req, int expect)
     assert(write(fds[0], req, half) == (ssize_t)half);
     usleep(1000);
     assert(write(fds[0], req + half, strlen(req) - half) == (ssize_t)(strlen(req) - half));
-    char response[10000];
+    char response[65536];
     int off = 0, r;
     while ((r = read(fds[0], response + off, sizeof(response) - 1 - off)) > 0)
         off += r;
@@ -280,7 +282,7 @@ static cJSON *request(const char *req, int expect)
     char *len = strstr(response, "Content-Length:");
     assert(len && atoi(len + 15) == (int)strlen(body));
     if (strstr(response,"Content-Type: text/html")) {
-        assert(strstr(body,"鸿颐安") && strstr(body,"/status") && strstr(body,"/events"));
+        assert(strstr(body,"颐鸿安") && strstr(body,"/status") && strstr(body,"/events"));
         assert(strstr(body,"command('ack')") && strstr(body,"command('mute')"));
         assert(strstr(body,"/config") && strstr(body,"setTimeout(refresh,2000)"));
         return cJSON_CreateObject();
@@ -288,6 +290,18 @@ static cJSON *request(const char *req, int expect)
     cJSON *j = cJSON_Parse(body);
     assert(j);
     return j;
+}
+/* Legacy route regressions run as an explicitly physically approved browser.
+ * Authentication rejection tests below use request_raw without injected headers. */
+static const char test_token[]="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static cJSON *request(const char *req,int expect) {
+    unsigned id;local_access_init();assert(!local_pair_request(test_token,tick,&id));
+    assert(!local_pair_approve(tick));
+    char authenticated[4096];const char *line=strstr(req,"\r\n");assert(line);
+    int prefix=(int)(line-req)+2;
+    snprintf(authenticated,sizeof(authenticated),"%.*sX-Care-Token: %s\r\n%s%s",prefix,req,test_token,
+       !strncmp(req,"POST ",5)&&expect>=200&&expect<300&&!strstr(req,"X-Care-Local:")?"X-Care-Local: 1\r\n":"",req+prefix);
+    return request_raw(authenticated,expect);
 }
 static void test_fall(void)
 {
@@ -479,6 +493,84 @@ static void test_commands(void)
     assert(!safety_command_take(&cmd));
     puts("PASS FIFO commands, overflow rejection, execution receipts");
 }
+
+static cJSON *access_request(const char *method,const char *path,const char *payload,const char *token,int expected) {
+    char req[2048],header[100]={0};
+    if(token)snprintf(header,sizeof(header),"X-Care-Token: %s\r\n",token);
+    snprintf(req,sizeof(req),"%s %s HTTP/1.1\r\n%sX-Care-Local: 1\r\nContent-Length: %u\r\n\r\n%s",method,path,header,(unsigned)strlen(payload),payload);
+    return request_raw(req,expected);
+}
+static void test_local_access_http(void) {
+    local_access_init();unsigned id;
+    const char *routes[]={"/ack","/mute","/config","/living","/medicine","/light","/care-policy","/care-pause","/messages/reply","/messages/seen"};
+    for(unsigned i=0;i<sizeof(routes)/sizeof(routes[0]);i++){cJSON *j=access_request("POST",routes[i],"{}",NULL,401);cJSON_Delete(j);}
+    const char *private_routes[]={"/events","/config","/messages","/command?id=1","/care-policy"};
+    for(unsigned i=0;i<sizeof(private_routes)/sizeof(private_routes[0]);i++){cJSON *j=access_request("GET",private_routes[i],"",NULL,401);cJSON_Delete(j);}
+    cJSON *j=access_request("GET","/status","",NULL,200);cJSON_Delete(j);
+    char payload[100];snprintf(payload,sizeof(payload),"{\"token\":\"%s\"}",test_token);
+    j=access_request("POST","/pair/request",payload,NULL,202);id=cJSON_GetObjectItem(j,"request_id")->valueint;cJSON_Delete(j);
+    j=access_request("GET","/pair/status","",test_token,200);assert(cJSON_IsFalse(cJSON_GetObjectItem(j,"paired")));cJSON_Delete(j);
+    j=access_request("GET","/config","",test_token,401);cJSON_Delete(j);
+    assert(local_pair_pending(tick)==id);assert(!local_pair_approve(tick));
+    j=access_request("GET","/pair/status","",test_token,200);assert(cJSON_IsTrue(cJSON_GetObjectItem(j,"paired")));cJSON_Delete(j);
+    j=access_request("GET","/config","",test_token,200);cJSON_Delete(j);
+    j=access_request("GET","/ack","",test_token,405);cJSON_Delete(j);
+    assert(!local_message_board(2,0,tick));
+    j=access_request("GET","/messages","",test_token,200);assert(cJSON_GetArraySize(cJSON_GetObjectItem(j,"items"))==1);cJSON_Delete(j);
+    j=access_request("POST","/messages/reply","{\"id\":1,\"code\":2,\"request_id\":\"http-one\"}",test_token,200);unsigned reply=cJSON_GetObjectItem(j,"id")->valueint;cJSON_Delete(j);
+    j=access_request("POST","/messages/reply","{\"id\":1,\"code\":2,\"request_id\":\"http-one\"}",test_token,200);assert(reply==(unsigned)cJSON_GetObjectItem(j,"id")->valueint);cJSON_Delete(j);
+    j=access_request("POST","/messages/reply","{\"id\":1,\"code\":1,\"request_id\":\"http-one\"}",test_token,409);cJSON_Delete(j);
+    j=access_request("POST","/messages/seen","{\"id\":1}",test_token,200);cJSON_Delete(j);
+    local_message_confirm();j=access_request("GET","/messages","",test_token,200);
+    cJSON *items=cJSON_GetObjectItem(j,"items");assert(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(items,0),"seen")));assert(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(items,1),"seen")));cJSON_Delete(j);
+    j=access_request("POST","/care-pause","{\"minutes\":30}",test_token,200);assert(cJSON_GetObjectItem(j,"pause_seconds")->valueint==1800);cJSON_Delete(j);
+    j=access_request("POST","/care-pause","{\"minutes\":0}",test_token,200);assert(cJSON_GetObjectItem(j,"pause_seconds")->valueint==0);cJSON_Delete(j);
+    j=access_request("POST","/pair/cancel","{}",test_token,200);cJSON_Delete(j);
+    j=access_request("GET","/config","",test_token,401);cJSON_Delete(j);
+    puts("PASS HTTP physical authorization: all mutations/private reads blocked before approval; message roundtrip, receipt, pause, revoke");
+}
+
+static void test_http_care_policy(void) {
+    care_policy_init();
+    cJSON *j=request("GET /care-policy HTTP/1.1\r\n\r\n",200);
+    assert(cJSON_GetObjectItem(j,"revision")->valueint==1);cJSON_Delete(j);
+    j=request("POST /care-policy HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",403);cJSON_Delete(j);
+    j=request("POST /care-policy HTTP/1.1\r\nX-Care-Local: 1\r\nContent-Length: 2\r\n\r\n{}",400);cJSON_Delete(j);
+    const char *payload="{\"enabled\":true,\"sleep_enabled\":true,\"start\":1320,\"end\":420,\"quiet\":0,\"expected_revision\":1}";
+    char req[512];snprintf(req,sizeof(req),"POST /care-policy HTTP/1.1\r\nX-Care-Local: 1\r\nContent-Length: %u\r\n\r\n%s",(unsigned)strlen(payload),payload);
+    j=request(req,200);assert(cJSON_GetObjectItem(j,"revision")->valueint==2);cJSON_Delete(j);
+    j=request(req,409);cJSON_Delete(j);
+    j=request("GET /care-policy HTTP/1.1\r\n\r\n",200);assert(cJSON_IsTrue(cJSON_GetObjectItem(j,"sleep_enabled")));cJSON_Delete(j);
+    puts("PASS local care policy HTTP: save/readback, malformed request, header required, revision conflict");
+}
+
+static void test_http_living(void)
+{
+    safety_command_t cmd;
+    while (safety_command_take(&cmd)) safety_command_done(&cmd, 0);
+    cJSON *j=request("GET /light HTTP/1.1\r\n\r\n",405);cJSON_Delete(j);
+    j=request("POST /light HTTP/1.1\r\nContent-Length: 10\r\n\r\n{\"mode\":1}",403);cJSON_Delete(j);
+    j=request("POST /light HTTP/1.1\r\nX-Care-Local: 1\r\nContent-Length: 10\r\n\r\n{\"mode\":8}",400);cJSON_Delete(j);
+    assert(!safety_command_take(&cmd));
+    j=request("POST /light HTTP/1.1\r\nX-Care-Local: 1\r\nContent-Length: 10\r\n\r\n{\"mode\":1}",202);
+    unsigned id=cJSON_GetObjectItem(j,"command_id")->valueint;cJSON_Delete(j);
+    assert(safety_command_take(&cmd)&&cmd.id==id&&cmd.code==SAFETY_CMD_LIGHT);
+    assert(living_execute(cmd.code,cmd.payload,1792500000)==0);safety_command_done(&cmd,0);
+    char query[256];snprintf(query,sizeof(query),"GET /command?id=%u HTTP/1.1\r\n\r\n",id);
+    j=request(query,200);assert(!strcmp(cJSON_GetObjectItem(j,"state")->valuestring,"executed"));cJSON_Delete(j);
+    living_status_t before,after;living_get(&before);
+    char body[512],req[1024];
+    snprintf(body,sizeof(body),"{\"night_auto\":false,\"medicine_enabled\":false,\"medicine_minute\":480,\"medicine_enabled_2\":false,\"medicine_minute_2\":720,\"medicine_enabled_3\":false,\"medicine_minute_3\":1200,\"expected_revision\":%u}",before.config.revision);
+    snprintf(req,sizeof(req),"POST /living HTTP/1.1\r\nX-Care-Local: 1\r\nContent-Length: %u\r\n\r\n%s",(unsigned)strlen(body),body);
+    j=request(req,202);cJSON_Delete(j);
+    assert(safety_command_take(&cmd)&&cmd.code==SAFETY_CMD_MEDICINE_PLAN);
+    assert(living_execute(cmd.code,cmd.payload,1792500000)==0);safety_command_done(&cmd,0);
+    living_get(&after);assert(after.config.revision==before.config.revision+1);
+    for(int i=0;i<3;i++)assert(!living_slot_enabled(&after.config,i));
+    assert(living_execute(cmd.code,cmd.payload,1792500000)==4); /* stale editor cannot overwrite new settings. */
+    puts("PASS local living HTTP: POST/header/validation, queue receipt, all-three disabled, stale revision rejected");
+}
+
 static void test_http_events(void)
 {
     unsigned int first = 0;
@@ -521,7 +613,9 @@ static void test_http_events(void)
     j = request("GET /info HTTP/1.1\r\n\r\n", 200);
     assert(!strcmp(cJSON_GetObjectItem(j, "ip")->valuestring, "192.168.1.23"));
     cJSON_Delete(j);
-    j = request("GET /ack HTTP/1.1\r\n\r\n", 200);
+    j = request("GET /ack HTTP/1.1\r\n\r\n", 405);
+    cJSON_Delete(j);
+    j = request("POST /ack HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}",200);
     unsigned int id = cJSON_GetObjectItem(j, "command_id")->valueint;
     cJSON_Delete(j);
     assert(safety_command_take(&cmd) && cmd.id == id);
@@ -629,7 +723,7 @@ static void test_wifi_backup(void)
 {
     sta = 0; wifi_attempts = 0; wifi_success_at = 2;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
-    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(!strcmp(wifi_selected, "Mate 80 Pro"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 2);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 1);
@@ -637,7 +731,7 @@ static void test_wifi_backup(void)
     assert(mqtt_connect_wifi() == -1 && wifi_attempts == 3);
     sta = 0; wifi_attempts = 0; wifi_success_at = 3;
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
-    assert(!strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(!strcmp(wifi_selected, "lumine"));
     assert(mqtt_connect_wifi() == 0 && wifi_attempts == 3);
     sta = 1;
     wifi_current = 2; wifi_recoveries = cloud_failures = 0; wifi_recovery_started = false;
@@ -645,7 +739,7 @@ static void test_wifi_backup(void)
     assert(sta == 1);
     wifi_cloud_failed(4000); assert(wifi_first == 2 && wifi_recoveries == 1);
     sta = 0; wifi_attempts = 0; wifi_success_at = 1;
-    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "CONFIGURE_LOCALLY"));
+    assert(mqtt_connect_wifi() == 0 && !strcmp(wifi_selected, "lumine"));
     wifi_cloud_failed(5000); wifi_cloud_failed(6000); wifi_cloud_failed(7000); wifi_cloud_failed(8000);
     assert(wifi_recoveries == 1); /* no rapid reconnect storm */
     wifi_cloud_failed(124000); assert(wifi_first == 0 && wifi_recoveries == 2);
@@ -654,7 +748,7 @@ static void test_wifi_backup(void)
     wifi_cloud_ok(); assert(cloud_failures == 0 && wifi_recoveries == 0);
     wifi_first = 0; sta = 1;
     puts("PASS cloud failure recovery: threshold, cooldown, current refresh, alternate rotation");
-    puts("PASS three hotspots including CONFIGURE_LOCALLY, existing link preservation, all unavailable");
+    puts("PASS three hotspots including lumine, existing link preservation, all unavailable");
 }
 static void test_cloud_commands(void)
 {
@@ -817,6 +911,31 @@ static void test_mqtt_queue(void)
     realtime = 0;
     puts("PASS alarm queue bounds, failure retention, successful QoS1 retry dequeues");
 }
+static void test_mqtt_contact(void) {
+    local_access_init();assert(!local_message_board(1,0,tick));
+    realtime=1;int fds[2];assert(!socketpair(AF_UNIX,SOCK_STREAM,0,fds));
+    Network net;NetworkInit(&net);net.my_socket=fds[0];MQTTClient c={0};
+    unsigned char sendbuf[1024],readbuf[1024];char payload[1024];unsigned id,revision;
+    MQTTClientInit(&c,&net,100,sendbuf,sizeof(sendbuf),readbuf,sizeof(readbuf));c.isconnected=1;
+    assert(publish_contact(&c,payload,sizeof(payload))==FAILURE);
+    assert(local_message_cloud_next(payload,sizeof(payload),&id,&revision)==1);
+    close(fds[1]);NetworkDisconnect(&net);assert(!socketpair(AF_UNIX,SOCK_STREAM,0,fds));net.my_socket=fds[0];c.isconnected=1;
+    pthread_t t;assert(!pthread_create(&t,NULL,ack_publish,&fds[1]));assert(publish_contact(&c,payload,sizeof(payload))==SUCCESS);pthread_join(t,NULL);
+    assert(!local_message_cloud_next(payload,sizeof(payload),&id,&revision));
+    close(fds[1]);NetworkDisconnect(&net);realtime=0;
+    char command[384],topic[256],response[256];unsigned slot; safety_command_t cmd;
+    snprintf(command,sizeof(command),"{\"service_id\":\"HomeSafety\",\"command_name\":\"contact\",\"paras\":{\"action\":\"reply\",\"boot_id\":%u,\"message_id\":1,\"code\":2,\"request_id\":\"remote-contact-one\"}}",safety_boot_id());
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=contact-one",command,strlen(command));
+    assert(safety_command_take(&cmd)&&cmd.code==SAFETY_CMD_CONTACT);int result=local_contact_execute(cmd.payload,0,tick);assert(!result);safety_command_done(&cmd,result);
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1);assert(strstr(response,"\"result_code\":0"));cloud_response_sent(slot);
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=contact-one",command,strlen(command));assert(!safety_command_take(&cmd));
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1);cloud_response_sent(slot);
+    const char *bad="{\"service_id\":\"Other\",\"command_name\":\"contact\",\"paras\":{\"action\":\"seen\",\"boot_id\":1,\"message_id\":1}}";
+    cloud_command_accept("$oc/devices/test_device/sys/commands/request_id=contact-bad",bad,strlen(bad));assert(!safety_command_take(&cmd));
+    assert(cloud_response_next(topic,sizeof(topic),response,sizeof(response),&slot)==1);assert(strstr(response,"\"result_code\":1"));cloud_response_sent(slot);
+    puts("PASS remote contact: MQTT PUBACK retry, command execution, service authorization, duplicate suppression");
+}
+
 static void test_mqtt(void)
 {
     realtime = 1;
@@ -907,7 +1026,13 @@ static void test_voice(void)
     safety_state_set(&state);
     const uint8_t temp_query[] = {3,1};
     su03t_receive_bytes(temp_query, sizeof(temp_query));
+#if VOICE_DEDICATED_IDX
+    /* 专用词条：明确播报“数据暂不可用”，仍然不允许把无效值报成 0℃ */
+    assert(voice_len == 6 && voice_bytes[2] == SU03T_SAY_NO_DATA);
+    voice_len = 0;
+#else
     assert(voice_len == 0); /* Invalid defaults must not be spoken as zero. */
+#endif
     state.env_valid = 1; state.temp = 25.5; state.humi = 60;
     safety_state_set(&state);
     su03t_receive_bytes(temp_query, 1);
@@ -921,7 +1046,13 @@ static void test_voice(void)
     su03t_receive_bytes(queries, sizeof(queries));
     assert(voice_len == 26 && voice_bytes[2] == 2 && voice_bytes[15] == 1);
     voice_len = 0; tick = 12000;
-    su03t_receive_bytes(temp_query, 2); assert(voice_len == 0);
+    su03t_receive_bytes(temp_query, 2);
+#if VOICE_DEDICATED_IDX
+    assert(voice_len == 6 && voice_bytes[2] == SU03T_SAY_NO_DATA); /* 采样过期 */
+    voice_len = 0;
+#else
+    assert(voice_len == 0);
+#endif
     tick = 1000; state.temp = 0; safety_state_set(&state);
     su03t_receive_bytes(temp_query, 2);
     assert(voice_len == 13); memcpy(&value,voice_bytes + 3,8); assert(value == 0);
@@ -978,6 +1109,43 @@ static void test_voice(void)
     su03t_process_voices(active,0,0,0,201000);
     active[0]=true;
     su03t_process_voices(active,0,0,1,202000);assert(!voice_len);
+    /* ---- 扩展语音指令表（v3.5.52）---- */
+    safety_command_t got;
+    while (safety_command_take(&got)) { } /* 清空遗留命令 */
+    voice_len=0;tick=300000;
+    const uint8_t sos_cmd[]={SU03T_PFX_HELP,1};
+    su03t_receive_bytes(sos_cmd,sizeof(sos_cmd));
+    assert(safety_command_take(&got)==1 && got.code==SAFETY_CMD_SOS && !strcmp(got.source,"voice"));
+    const uint8_t mute_cmd[]={SU03T_PFX_MUTE,1};
+    su03t_receive_bytes(mute_cmd,sizeof(mute_cmd));
+    assert(safety_command_take(&got)==1 && got.code==SAFETY_CMD_MUTE);
+    const uint8_t unmute_cmd[]={SU03T_PFX_MUTE,2};
+    su03t_receive_bytes(unmute_cmd,sizeof(unmute_cmd));
+    assert(safety_command_take(&got)==1 && got.code==SAFETY_CMD_UNMUTE);
+    const uint8_t ack_cmd[]={SU03T_PFX_HELP,2};
+    su03t_receive_bytes(ack_cmd,sizeof(ack_cmd));
+    assert(safety_command_take(&got)==1 && got.code==SAFETY_CMD_ACK);
+    const uint8_t bad_cmd[]={SU03T_PFX_HELP,9};
+    su03t_receive_bytes(bad_cmd,sizeof(bad_cmd));
+    assert(safety_command_take(&got)==0); /* 非法参数不得触发任何动作 */
+    const uint8_t ext_light_off[]={SU03T_PFX_LIGHT,2};
+    su03t_receive_bytes(ext_light_off,sizeof(ext_light_off));
+    living_tick(0,1200,0,1,0);living_get(&lamp);assert(!lamp.night_on);
+    const uint8_t ext_light_auto[]={SU03T_PFX_LIGHT,3};
+    su03t_receive_bytes(ext_light_auto,sizeof(ext_light_auto));
+    living_tick(0,1201,0,1,0);living_get(&lamp);assert(lamp.light_mode==-1);
+    voice_len=0;
+    const uint8_t light_query[]={SU03T_PFX_QUERY,4};
+    su03t_receive_bytes(light_query,sizeof(light_query));
+    assert(voice_len==13 && voice_bytes[2]==SU03T_VAL_IDX_LIGHT); /* 光照沿用出厂 3 号模板 */
+    const uint8_t page_ev[]={SU03T_PFX_PAGE,1};
+    su03t_receive_bytes(page_ev,sizeof(page_ev));
+    assert(su03t_take_page()==1 && su03t_take_page()==-1);
+    char note[24];tick=400000;
+    su03t_receive_bytes(ext_light_off,sizeof(ext_light_off));
+    assert(su03t_note(note,sizeof(note),400500) && note[0]);
+    assert(!su03t_note(note,sizeof(note),404000)); /* 提示 3 秒后失效 */
+    puts("PASS voice commands: SOS/mute/unmute/ack/light/page/query, invalid param rejected, note TTL");
     puts("PASS voice scheduler UART: SOS mapping, held alarm once, deferred medicine, mute and vocabulary gates");
     puts("PASS voice: invalid/stale silence, split/combined queries, exact frame, valid zero, alarm profile guard");
 }
@@ -1134,6 +1302,10 @@ int main(void)
     test_cloud_commands();
     test_iotda_properties();
     test_mqtt_queue();
+    test_mqtt_contact();
+    test_http_living();
+    test_http_care_policy();
+    test_local_access_http();
     puts("ALL TESTS PASSED");
     return 0;
 }

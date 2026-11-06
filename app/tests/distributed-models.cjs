@@ -46,5 +46,7 @@ const {Backend} = load('services/Backend.ets',name=>name==='@kit.NetworkKit'?net
   assert.equal(m.gatewayId([{device_id:'watch',kind:'wearable'}]),'');
   assert.equal(m.environmentNodes([{device_id:'watch',kind:'wearable'},{device_id:'env',kind:'nearlink'}]).length,1);
   assert.equal(m.heartText({heart_rate:75,hr_measuring:false}),'未测到');
+  payload={code:0,data:{access_token:'no-home-token',device_ids:[],devices:[]}};
+  await api.login('https://example.test','independent-user','test-password');assert.equal(api.device,'');assert.equal(api.token,'no-home-token');assert.equal(api.family.devices.length,0);
   console.log('PASS distributed: missing vs zero, sensor units, door types, vitals, stale/future data, UTC buckets, authorized device selection and logout');
 })().catch(error=>{console.error(error);process.exitCode=1;});

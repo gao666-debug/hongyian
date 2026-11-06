@@ -24,6 +24,7 @@
  * 可通过 NET_SERVER_ENABLED 开关（默认 1）
  */
 void net_server_start(void);
+void net_server_local_ip(char *ip, int size);
 
 /* 更新对外发布的实时数据（由监测线程周期性调用） */
 void net_server_update(double temp, double humi, double gas_ppm, bool body,

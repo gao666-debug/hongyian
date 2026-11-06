@@ -44,6 +44,8 @@ static_library("home_safety_example") {
         "src/safety_runtime.c",
         "src/safety_logic.c",
         "src/monitor_logic.c",
+        "src/care_policy.c",
+        "src/local_access.c",
         "src/safety_stats.c",
     ]
 

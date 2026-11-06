@@ -1,3 +1,4 @@
+#include "local_access.h"
 /*
  * Copyright (c) 2024 iSoftStone Education Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -446,6 +447,35 @@ void ui_show_living(const living_config_t *draft,int field,int result)
     previous_field=field;
 }
 
+static void ui_show_contact(void) {
+    int selected,board,reply,confirmed;char text[100];
+    const char *sent[]={"暂无消息","我一切正常","请给我打电话","需要生活协助"};
+    const char *received[]={"等待家人回复","已收到消息","正在赶来","已联系人员协助"};
+    local_message_view(&selected,&board,&reply,&confirmed);
+    panel_begin(20,"颐鸿安 / 联系家人","本地");
+    panel_text(0,8,30,304,24,"选择要发送的消息",UI_MUTED,LCD_WHITE,16);
+    panel_text(1,8,59,304,25,sent[selected],UI_BLUE,LCD_WHITE,16);
+    snprintf(text,sizeof(text),"最近发送: %s",sent[board]);
+    panel_text(2,8,90,304,25,text,UI_INK,LCD_WHITE,16);
+    panel_text(3,8,121,304,25,received[reply],reply?UI_BLUE:UI_MUTED,LCD_WHITE,16);
+    panel_text(4,8,151,304,23,reply?(confirmed?"已确认家人回复":"K6确认已看到回复"):"同一网络网页可回复",UI_MUTED,LCD_WHITE,16);
+    panel_text(5,4,183,312,24,"紧急情况请按K3主动求助",UI_RED,UI_BG,16);
+    panel_text(6,4,215,312,22,"K4选择  K6发送/确认  K5翻页",UI_BLUE,UI_BG,16);
+}
+static void ui_show_pairing(void) {
+    char text[80];unsigned pending=local_pair_pending(LOS_TickCountGet());
+    panel_begin(21,"颐鸿安 / 手机配对","本地");
+    snprintf(text,sizeof(text),"已授权会话: %u / 4",local_pair_count(LOS_TickCountGet()));
+    panel_text(0,8,30,304,24,text,UI_INK,LCD_WHITE,16);
+    if(pending)snprintf(text,sizeof(text),"待确认请求: %u",pending);
+    else snprintf(text,sizeof(text),"等待手机发起配对");
+    panel_text(1,8,64,304,25,text,pending?UI_BLUE:UI_MUTED,LCD_WHITE,16);
+    panel_text(2,8,101,304,24,"核对手机显示的请求编号",UI_INK,LCD_WHITE,16);
+    panel_text(3,8,134,304,24,"请求60秒有效  授权30分钟",UI_MUTED,LCD_WHITE,16);
+    panel_text(4,8,167,304,24,"重启后需要重新配对",UI_MUTED,LCD_WHITE,16);
+    panel_text(5,4,215,312,22,"K6同意  K4撤销全部  K5翻页",UI_BLUE,UI_BG,16);
+}
+
 /* Only this worker draws after ui_init. The safety monitor never waits for
  * SPI or a display queue: a slow display simply skips obsolete snapshots. */
 typedef struct {
@@ -461,7 +491,7 @@ static int s_worker_started;
 void ui_present(int page,const safety_state_t *state,const char *status,
                 const living_config_t *draft,int field,int result,int events_changed)
 {
-    if(page<0 || page>4 || !state || !status)return;
+    if(page<0 || page>6 || !state || !status)return;
     living_status_t life;living_get(&life);
     safety_lock();
     s_requested.life=life;
@@ -496,7 +526,9 @@ void ui_render_pending(void)
     } else if(f.page<3) {
         ui_show_events(f.page-1);
     } else if(f.page==3)ui_show_diagnostics();
-    else ui_show_living(f.has_draft?&f.draft:NULL,f.field,f.result);
+    else if(f.page==4)ui_show_living(f.has_draft?&f.draft:NULL,f.field,f.result);
+    else if(f.page==5)ui_show_contact();
+    else ui_show_pairing();
     if(f.page==0)metric_animate();
     else memset(s_metric,0,sizeof(s_metric));
     drawn_page=f.page;drawn_serial=f.serial;
