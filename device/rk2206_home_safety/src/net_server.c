@@ -256,6 +256,7 @@ static int send_all(int fd, const char *data, int n)
         int r = send(fd, data + sent, n - sent, 0);
         if (r <= 0)
         {
+            perror("[http] send");
             printf("[http] send failed fd=%d rc=%d\n", fd, r);
             return -1;
         }
@@ -383,7 +384,7 @@ static void http_handle_client(int fd)
         *query++ = 0;
     if (strcmp(method, "GET") && !(strcmp(method, "POST") == 0 &&
         (!strcmp(url, "/config") || !strcmp(url, "/ack") || !strcmp(url, "/mute") ||
-         !strcmp(url, "/pair/request") || !strcmp(url, "/pair/cancel") || !strcmp(url, "/messages/reply") || !strcmp(url, "/messages/seen") || !strcmp(url, "/care-pause") || !strcmp(url, "/care-policy") || !strcmp(url, "/living") || !strcmp(url, "/medicine") || !strcmp(url, "/light"))))
+         !strcmp(url, "/pair/request") || !strcmp(url, "/pair/cancel") || !strcmp(url, "/messages/send") || !strcmp(url, "/messages/reply") || !strcmp(url, "/messages/seen") || !strcmp(url, "/care-pause") || !strcmp(url, "/care-policy") || !strcmp(url, "/living") || !strcmp(url, "/medicine") || !strcmp(url, "/light"))))
     {
         http_reply(fd, 405, "{\"ok\":false}");
         return;
@@ -413,23 +414,34 @@ static void http_handle_client(int fd)
         local_pair_cancel(access_token);http_reply(fd,200,"{\"ok\":true}");return;
     }
     /* Mutations never use GET: prefetched links must not ACK or mute alarms. */
-    if(!strcmp(method,"GET")&&(!strcmp(url,"/ack")||!strcmp(url,"/mute")||!strcmp(url,"/messages/reply")||!strcmp(url,"/messages/seen")||!strcmp(url,"/care-pause"))){http_reply(fd,405,"{\"error\":\"post_required\"}");return;}
+    if(!strcmp(method,"GET")&&(!strcmp(url,"/ack")||!strcmp(url,"/mute")||!strcmp(url,"/messages/send")||!strcmp(url,"/messages/reply")||!strcmp(url,"/messages/seen")||!strcmp(url,"/care-pause"))){http_reply(fd,405,"{\"error\":\"post_required\"}");return;}
     unsigned client_identity=local_pair_identity(access_token,access_now);
     if(strcmp(url,"/status") && !client_identity){http_reply(fd,401,"{\"error\":\"physical_pairing_required\"}");return;}
     if(!strcmp(method,"POST")&&!local_control){http_reply(fd,403,"{\"error\":\"local_header_required\"}");return;}
     if(!strcmp(url,"/messages")){rc=local_messages_json(body,sizeof(body));}
+    else if(!strcmp(url,"/messages/send")) {
+        cJSON *j=have_length&&!strstr(payload,"\\u0000")?cJSON_ParseWithOpts(payload,NULL,1):NULL;
+        cJSON *text=cJSON_GetObjectItemCaseSensitive(j,"text"),*request=cJSON_GetObjectItemCaseSensitive(j,"request_id");unsigned id=0;
+        int result=cJSON_IsObject(j)&&cJSON_GetArraySize(j)==2&&cJSON_IsString(text)&&cJSON_IsString(request)?local_message_text(client_identity,0,0,text->valuestring,"NFC网页",request->valuestring,sntp_get_epoch(),access_now,&id):1;
+        cJSON_Delete(j);if(result){http_reply(fd,result==3?503:result==4?409:400,"{\"error\":\"text_not_accepted\"}");return;}
+        snprintf(body,sizeof(body),"{\"ok\":true,\"id\":%u,\"boot_id\":%u}",id,safety_boot_id());
+    }
     else if(!strcmp(url,"/messages/reply")||!strcmp(url,"/messages/seen")) {
         cJSON *j=have_length?cJSON_ParseWithOpts(payload,NULL,1):NULL;
         cJSON *id=cJSON_GetObjectItemCaseSensitive(j,"id"),*code=cJSON_GetObjectItemCaseSensitive(j,"code"),*request=cJSON_GetObjectItemCaseSensitive(j,"request_id");
         int result=1;unsigned message_id=0;
         int valid_id=cJSON_IsNumber(id)&&id->valuedouble>=1&&id->valuedouble<=999999999&&id->valuedouble==id->valueint;
         if(valid_id && cJSON_IsObject(j)) {
-            if(!strcmp(url,"/messages/seen")&&cJSON_GetArraySize(j)==1)result=local_message_seen(id->valueint,0);
+            if(!strcmp(url,"/messages/seen")) {
+                cJSON *direction=cJSON_GetObjectItemCaseSensitive(j,"direction");
+                if(cJSON_GetArraySize(j)==1)result=local_message_seen(id->valueint,0);
+                else if(cJSON_GetArraySize(j)==2&&cJSON_IsString(direction)&&(!strcmp(direction->valuestring,"board")||!strcmp(direction->valuestring,"family")))result=local_message_seen(id->valueint,!strcmp(direction->valuestring,"family"));
+            }
             else if(!strcmp(url,"/messages/reply")&&cJSON_GetArraySize(j)==3&&cJSON_IsNumber(code)&&code->valuedouble==code->valueint&&code->valueint>=1&&code->valueint<=3&&cJSON_IsString(request))
                 result=local_message_reply(client_identity,code->valueint,id->valueint,request->valuestring,sntp_get_epoch(),access_now,&message_id);
         }
         cJSON_Delete(j);
-        if(result){http_reply(fd,result==2?404:result==4?409:400,"{\"error\":\"message_rejected\"}");return;}
+        if(result){http_reply(fd,result==2?404:result==3?503:result==4?409:400,"{\"error\":\"message_rejected\"}");return;}
         snprintf(body,sizeof(body),"{\"ok\":true,\"id\":%u,\"boot_id\":%u}",message_id,safety_boot_id());
     }
     else    if (!strcmp(url, "/living") || !strcmp(url, "/medicine") || !strcmp(url, "/light"))
@@ -480,9 +492,13 @@ static void http_handle_client(int fd)
     else if (!strcmp(url, "/config"))
     {
         if (!strcmp(method, "GET"))
-            rc = safety_config_json(body, sizeof(body));
+        {rc = safety_config_json(body, sizeof(body));
+            if(!rc){cJSON *config=cJSON_Parse(body);cJSON *threshold=cJSON_GetObjectItemCaseSensitive(config,"noact_ms");if(cJSON_IsNumber(threshold)){cJSON_SetNumberValue(threshold,care_policy_timeout((unsigned)threshold->valueint));if(!cJSON_PrintPreallocated(config,body,sizeof(body),0))rc=-1;}cJSON_Delete(config);}
+        }
         else
         {
+            cJSON *requested=cJSON_Parse(payload);int has_threshold=cJSON_GetObjectItemCaseSensitive(requested,"noact_ms")!=NULL;cJSON_Delete(requested);
+            if(has_threshold&&care_policy_timeout(0)){http_reply(fd,409,"{\"error\":\"use_care_policy_for_threshold\"}");return;}
             rc = safety_config_apply_json(payload);
             if (rc)
             {

@@ -366,7 +366,7 @@ int safety_command_submit(int code, const char *source, unsigned int *id)
 int safety_command_submit_payload(int code, const char *source, const char *payload, unsigned int *id)
 {
     safety_command_t *c;
-    if (code < SAFETY_CMD_ACK || code > SAFETY_CMD_CONTACT || !payload || strlen(payload) >= 384)
+    if (code < SAFETY_CMD_ACK || code > SAFETY_CMD_CARE_PAUSE || !payload || strlen(payload) >= sizeof(c->payload))
         return -1;
     safety_lock();
     if (s_count == 8)
@@ -498,4 +498,3 @@ void safety_i2c_unlock(void)
 {
     osMutexRelease(s_i2c);
 }
-

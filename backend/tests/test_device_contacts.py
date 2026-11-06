@@ -24,7 +24,7 @@ class DeviceContactTests(unittest.TestCase):
                     await c.post('/api/v1/household/members',headers=owner,json={'username':'viewer','password':'viewer-pass','role':'viewer'})
                     viewer=await login('viewer','viewer-pass')
                     self.assertEqual((await c.get('/api/v1/devices/main/messages',headers=viewer)).status_code,200)
-                    self.assertEqual((await c.post('/api/v1/devices/main/messages/7/1/reply',headers=viewer,json={'code':1,'client_request_id':'a'})).status_code,403)
+                    self.assertEqual((await c.post('/api/v1/devices/main/messages/7/1/reply',headers=viewer,json={'code':1,'client_request_id':'a'})).status_code,202)
                     self.assertEqual((await c.get('/api/v1/devices/watch/messages',headers=owner)).status_code,409)
                     self.assertEqual((await c.get('/api/v1/devices/unknown/messages',headers=owner)).status_code,404)
                     body={'code':2,'client_request_id':'reply-one'}

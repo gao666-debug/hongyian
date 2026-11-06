@@ -24,7 +24,8 @@ int main(void){
  local_message_select();local_message_view(&selected,&board,&reply,&seen);assert(selected==2);
  char buf[4096];assert(!local_messages_json(buf,sizeof(buf)));assert(strstr(buf,"\"boot_id\":42"));assert(!strstr(buf,"req"));assert(local_messages_json(buf,8)==-1);
  assert(!local_message_board(3,0,2200));local_message_view(&selected,&board,&reply,&seen);assert(board==3&&reply==0&&!seen);
- for(unsigned i=0;i<25;i++)assert(!local_message_board(1,1700000000,4400+i*2100));
+ unsigned published_id,published_revision;while(local_message_cloud_next(buf,sizeof(buf),&published_id,&published_revision)>0)local_message_cloud_done(published_id,published_revision);
+ for(unsigned i=0;i<25;i++){assert(!local_message_board(1,1700000000,4400+i*2100));while(local_message_cloud_next(buf,sizeof(buf),&published_id,&published_revision)>0)local_message_cloud_done(published_id,published_revision);}
  assert(local_message_reply(1,1,1,"evicted",0,0,&id)==2);
  local_access_init();assert(!local_message_board(1,0,0));
  unsigned event_id,revision;assert(local_message_cloud_next(buf,sizeof(buf),&event_id,&revision)==1);assert(strstr(buf,"contact_event"));assert(event_id==1&&revision==1);
@@ -36,5 +37,16 @@ int main(void){
  assert(!local_contact_execute("{\"action\":\"reply\",\"boot_id\":42,\"message_id\":1,\"code\":2,\"request_id\":\"cloud-reply\"}",0,1));
  local_message_confirm();assert(local_message_cloud_next(buf,sizeof(buf),&id,&again)==1);assert(strstr(buf,"\"seen\":true"));
  local_access_init();assert(!local_pair_count(0));assert(!local_messages_json(buf,sizeof(buf)));assert(strstr(buf,"\"items\":[]"));
+ local_access_init();assert(local_text_valid("你好 😀"));assert(!local_text_valid(" \n\t"));assert(!local_text_valid("\xc0\x80"));assert(!local_text_valid("\xed\xa0\x80"));
+ char longtext[124];for(int i=0;i<41;i++)memcpy(longtext+i*3,"中",3);longtext[123]=0;assert(!local_text_valid(longtext));longtext[120]=0;assert(local_text_valid(longtext));
+ assert(!local_message_text(1,0,0,"你好 <script> \"\\","NFC网页","text-one",0,0,&id));
+ assert(!local_message_text(2,0,0,"你好 <script> \"\\","NFC网页","text-one",0,0,&again)&&id==again);
+ assert(local_message_text(1,0,0,"changed","NFC网页","text-one",0,0,&again)==4);
+ assert(!local_contact_execute("{\"action\":\"chat\",\"boot_id\":42,\"message_id\":0,\"code\":4,\"request_id\":\"family-text\",\"text\":\"家人回复 😀\",\"author\":\"alice\"}",0,0));
+ local_message_view(&selected,&board,&reply,&seen);assert(reply==4&&!seen);local_message_confirm();local_message_view(&selected,&board,&reply,&seen);assert(seen);
+ char escaped[8192];assert(!local_messages_json(escaped,sizeof(escaped)));assert(strstr(escaped,"家人回复"));
+ local_access_init();for(unsigned i=0;i<16;i++)assert(!local_message_text(1,0,0,"waiting","NFC网页",(snprintf(buf,sizeof(buf),"q-%u",i),buf),0,0,&id));
+ assert(local_message_text(1,0,0,"full","NFC网页","overflow",0,0,&id)==3);
+ puts("PASS NFC text: strict UTF-8 and limits, JSON escaping, stable retries, unsolicited family text, read confirmation and no unsent overwrite");
  puts("PASS physical pairing: deny before approval, expiry, cancellation, isolation, reboot; local messages: dedup, ACK direction, ring bounds");
 }

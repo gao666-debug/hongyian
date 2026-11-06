@@ -1,3 +1,4 @@
+from .care_controls import CareReport
 import asyncio
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -93,6 +94,8 @@ class Health(BaseModel):
     mute: int = Field(ge=0,le=1)
     tls: bool
     living: LivingStatus | None = None
+    care_policy: CareReport | None = None
+    contact_text: bool | None = None
     door_valid: int | None = Field(default=None,ge=0,le=1)
     # Optional for older firmware; absence is not a healthy reading.
     sample_up: int | None = Field(default=None,ge=0)
@@ -209,6 +212,7 @@ def create_app(settings=None, cloud=None):
                 if name in ('ack','mute'): health['mute']=1
                 if name=='sos': health['mute']=0
                 result=0
+                if name in ('set_care_policy','pause_care'):result=care_controls.mock_execute(row['device'],name,json.loads(row['body'])['paras'],health)
                 if name=='contact':result=device_contacts.mock_execute(row['device'],json.loads(row['body'])['paras'])
                 if name in ('set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light'):
                     params=json.loads(row['body'])['paras']
@@ -239,7 +243,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.12.0',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.13.0',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -259,7 +263,7 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.12.0','camera_transport':'jpeg-relay'})
+                         'api_version':'1.13.0','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
     from .accounts import Accounts
@@ -277,6 +281,10 @@ def create_app(settings=None, cloud=None):
     device_contacts=DeviceContacts(store,settings,homes)
     app.state.device_contacts=device_contacts
     device_contacts.install(app,session,envelope,run_command,tasks,command_data)
+    from .care_controls import CareControls
+    care_controls=CareControls(store,settings,homes)
+    care_controls.install(app,session,envelope,run_command,tasks,command_data)
+    app.state.care_controls=care_controls
     app.state.cameras = cameras
 
     @app.post('/api/v1/auth/login')
@@ -673,6 +681,8 @@ def create_app(settings=None, cloud=None):
                 if previous:
                     older=(data['boot_id'],data['up'])<(previous['boot_id'],previous['up'])
                     current_life=previous.get('living') or {};incoming_life=data.get('living') or {}
+                    if data['boot_id']==previous['boot_id'] and previous.get('care_policy') and data.get('care_policy'):
+                        older=older or data['care_policy']['revision']<previous['care_policy']['revision'] or data['care_policy']['pause_revision']<previous['care_policy']['pause_revision']
                     if data['boot_id']==previous['boot_id'] and current_life.get('schema')==2 and incoming_life.get('schema')==2:
                         older=older or incoming_life['medicine_revision']<current_life['medicine_revision'] or incoming_life['config_revision']<current_life['config_revision']
                     if older:return envelope({'duplicate':False,'accepted':False,'reason':'older health report'})

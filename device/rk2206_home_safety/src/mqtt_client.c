@@ -1,3 +1,4 @@
+#include "care_policy.h"
 #include "local_access.h"
 /*
  * Copyright (c) 2024 iSoftStone Education Co., Ltd.
@@ -261,6 +262,9 @@ static int health_message_json(char *payload, int n)
         quality.stale ? "true" : "false", quality.env_available ? "true" : "false",
         quality.fall_detection_available ? "true" : "false", sntp_get_epoch() ? "true" : "false");
     if(rc<2 || rc>=n) return FAILURE;
+    char care[512];if(care_policy_json(care,sizeof(care),sntp_get_epoch(),LOS_TickCountGet()))return FAILURE;
+    int added=snprintf(payload+rc-2,n-rc+2,",\"care_policy\":%s,\"contact_text\":true}}",care);
+    if(added<0||added>=n-rc+2)return FAILURE;rc=(int)strlen(payload);
     char living[1024];if(living_json(living,sizeof(living)))return FAILURE;
     int extra=snprintf(payload+rc-2,n-rc+2,",\"living\":%s}}",living);
     return extra<0 || extra>=n-rc+2?FAILURE:SUCCESS;
@@ -385,7 +389,7 @@ static void mqtt_task(void *arg)
             wifi_cloud_ok();
             backoff = 1000;
             uint64_t next_report = 0, next_health = 0, next_stats = 0, health_changed_after=0;
-            unsigned living_sent=~0U;
+            unsigned living_sent=~0U,care_sent=~0U;
             printf("[iotda] connected host=%s service=%s port=%d tls=%d\r\n", IOTDA_HOST, IOTDA_SERVICE_ID, IOTDA_PORT, IOTDA_TLS_ENABLED);
             while (linked() && MQTTIsConnected(&client))
             {
@@ -410,10 +414,10 @@ static void mqtt_task(void *arg)
                     next_report = now + cfg.report_ms;
                     }
                 }
-                if (now >= next_health || (living_sent!=living_serial() && now>=health_changed_after)) {
-                    unsigned snapshot_serial=living_serial();
+                if (now >= next_health || ((living_sent!=living_serial()||care_sent!=care_policy_serial()) && now>=health_changed_after)) {
+                    unsigned snapshot_serial=living_serial(),snapshot_care=care_policy_serial();
                     if (publish_health(&client, payload, sizeof(payload)) != SUCCESS) { printf("[iotda] exit stage=health-publish\r\n"); break; }
-                    living_sent=snapshot_serial;health_changed_after=now+1000;
+                    living_sent=snapshot_serial;care_sent=snapshot_care;health_changed_after=now+1000;
                     next_health = now + 60000;
                 }
                 if (now >= next_stats) {

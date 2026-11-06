@@ -397,6 +397,7 @@ static void safety_monitor_thread(void *arg)
                 mute_forced=false;beep_start=now;
                 printf("[voice] mute released; alarm state unchanged\r\n");
             }
+            else if(cmd.code==SAFETY_CMD_CARE_POLICY||cmd.code==SAFETY_CMD_CARE_PAUSE)command_result=care_cloud_execute(cmd.code,cmd.payload,now);
             else if(cmd.code==SAFETY_CMD_CONTACT)command_result=local_contact_execute(cmd.payload,sntp_get_epoch(),now);
             else command_result=living_execute(cmd.code,cmd.payload,sntp_get_epoch());
         }
@@ -484,6 +485,7 @@ static void safety_monitor_thread(void *arg)
             door_prev = door;
         }
         door_seeded = door_valid;
+        unsigned noact_timeout=care_policy_timeout(cfg.noact_ms);
         int care_mode = care_policy_mode_at(sntp_get_epoch(),now);
         if (care_mode == 0 || (previous_care_mode != 1 && care_mode == 1)) {
             memset(&care, 0, sizeof(care));
@@ -493,7 +495,7 @@ static void safety_monitor_thread(void *arg)
         previous_care_mode = care_mode;
         monitor_care_result_t care_result = monitor_care_step(&care, now,
             v->body_valid && care_mode != 0, v->body, key != KEY_NONE || long_key != KEY_NONE,
-            door_changed, cfg.noact_ms);
+            door_changed, noact_timeout);
         unsigned int inactive = care_result.inactive_ms;
         /* A sensor outage cannot falsely end a previously detected environment alarm. */
         if (v->env_valid)
@@ -573,7 +575,7 @@ static void safety_monitor_thread(void *arg)
         su03t_process_voices(voice_alarms,medicine_voice_mask,living_beep(now),
                              audible_any && !beep,now);
         bool care_beep = care_mode == 1 && noact_warning && !noact_alert && !any &&
-                         ((inactive - cfg.noact_ms) / 1000U) % 4U == 0;
+                         ((inactive - noact_timeout) / 1000U) % 4U == 0;
         monitor_outputs_t outputs = monitor_outputs(audible_any, help_on, fall.active || gas,
             noact_warning && care_mode == 1, beep, care_beep, ls.light_owner == 2,
             living_beep(now), ls.night_on);

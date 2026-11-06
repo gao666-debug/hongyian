@@ -22,6 +22,10 @@ ROLE_PERMISSIONS = {
     'property': {'alarms.read', 'alarms.handle'},
 }
 
+# Contact chat never grants alarm/device control permission.
+for _permissions in ROLE_PERMISSIONS.values():
+    _permissions.update({'device.messages.read','device.messages.write'})
+
 class Households:
     def __init__(self,store,settings):
         self.store,self.settings=store,settings

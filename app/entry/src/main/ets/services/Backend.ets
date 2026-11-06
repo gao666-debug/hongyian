@@ -6,7 +6,7 @@ import { DistributedFamily, DistributedNode, gatewayId } from '../models/Distrib
 
 export class Backend {
   base: string = '';
-  device: string = 'demo-device';
+  device: string = '6acdec5b18855b39c5552ec3_TXSMART001';
   token: string = '';
   username: string = '';
   deviceIds: string[] = [];

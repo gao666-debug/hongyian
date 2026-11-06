@@ -29,7 +29,7 @@ const PRIMARY: string = CareTheme.primary;
 const BG: string = CareTheme.background;
 const RED: string = CareTheme.alarm;
 const AMBER: string = CareTheme.warmInk;
-const DEVICE: string = 'demo-device';
+const DEVICE: string = '6acdec5b18855b39c5552ec3_TXSMART001';
 
 interface DoorRecord { state:string; previous:string; observed_at:number; }
 interface DoorSummary { hint:string; level:string; door?:string; }
@@ -248,7 +248,7 @@ struct Index {
   @State alarmTotal: number = 0;
   @State chartDay: number = 0;
   @State settingsOpen: boolean = false;
-  @State serverDraft: string = 'https://backend.example.com';
+  @State serverDraft: string = 'https://47.116.171.114:8443';
   @State userDraft: string = 'guardian';
   @State passwordDraft: string = '';
   @State loginBusy: boolean = false;
@@ -1246,13 +1246,14 @@ struct Index {
       Text($$.value).fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({maxWidth:'48%'}).textAlign(TextAlign.End)
       this.icon($r('app.media.chevron'),16)
     }.width('100%').constraintSize({minHeight:56}).padding({top:10,bottom:10}).onClick(()=>{
-      if(['living','trend','environment','wearable','camera','activity','door','reports','diagnostics'].includes($$.action)&&!this.allowed('view')){this.familyMessage='当前账号仅开放报警协作';return;}
+      if(['living','trend','environment','wearable','camera','activity','door','reports','diagnostics','remotecare'].includes($$.action)&&!this.allowed('view')){this.familyMessage='当前账号仅开放报警协作';return;}
       if($$.action==='living'){this.openLiving();}
       else if($$.action==='trend'){this.navigate(2);}
       else if($$.action==='environment'||$$.action==='wearable'){router.pushUrl({url:'pages/Nodes',params:{kind:$$.action}});}
       else if($$.action==='camera'){router.pushUrl({url:'pages/Camera'});}
       else if($$.action==='messages'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/Messages'});}else{this.openConnection();}}
       else if($$.action==='accounts'){router.pushUrl({url:'pages/AccountCenter',params:{server:this.serverDraft}});}
+      else if($$.action==='remotecare'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/CareSettings'});}else{this.openConnection();}}
       else if($$.action==='localcontrol'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/LocalControl'});}else{this.openConnection();}}
       else if($$.action==='devicecontact'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/DeviceContact'});}else{this.openConnection();}}
       else if($$.action==='connection'){this.openConnection();}
@@ -1662,9 +1663,11 @@ struct Index {
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.home'),title:'家庭与账号',value:'邀请与登录设备',action:'accounts'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
+        this.entryRow({icon:$r('app.media.shield'),title:'无活动远程设置',value:'阈值与睡眠时段',action:'remotecare'})
+        Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.device'),title:'主板本地控制',value:'无活动与配对',action:'localcontrol'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
-        this.entryRow({icon:$r('app.media.device'),title:'主板联系消息',value:'消息与回复',action:'devicecontact'})
+        this.entryRow({icon:$r('app.media.device'),title:'NFC与家人聊天',value:'文字与回复',action:'devicecontact'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.home'),title:'家庭成员',value:this.familyRole==='owner'?'邀请与权限':'查看家庭设备',action:'members'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
@@ -1862,8 +1865,8 @@ struct Index {
     Column({space:14}) {
       Row() { Text('连接后端').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK); Blank(); Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{this.settingsOpen=false;this.passwordDraft='';}) }.width('100%')
       Text('登录后查询真实设备；不会把云账号密钥放进 App。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
-      TextInput({text:this.serverDraft,placeholder:'https://backend.example.com'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.serverDraft=value;})
-      Text('使用公网服务器地址').fontSize(this.readableSize(13)).fontColor(PRIMARY).width('100%').onClick(()=>{this.serverDraft='https://backend.example.com';})
+      TextInput({text:this.serverDraft,placeholder:'https://47.116.171.114:8443'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.serverDraft=value;})
+      Text('使用公网服务器地址').fontSize(this.readableSize(13)).fontColor(PRIMARY).width('100%').onClick(()=>{this.serverDraft='https://47.116.171.114:8443';})
       TextInput({text:this.userDraft,placeholder:'用户名'}).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.userDraft=value;})
       if (this.loggedIn) { Text('本次登录密码可点右侧眼睛查看；退出或重启后清除。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%') }
       TextInput({text:this.passwordDraft,placeholder:'后端登录密码'}).type(InputType.Password).height(this.elderMode ? 60 : 48).fontSize(this.readableSize(14)).backgroundColor(BG).borderRadius(12).onChange((value:string)=>{this.passwordDraft=value;})

@@ -1,3 +1,4 @@
+#include "care_policy.h"
 #include "local_access.h"
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "cloud_commands.h"
@@ -59,11 +60,15 @@ void cloud_command_accept(const char *topic, const char *body, size_t length)
         if (!strcmp(name->valuestring,"set_medicine_plan")) code=SAFETY_CMD_MEDICINE_PLAN;
         if (!strcmp(name->valuestring,"set_medicine_state")) code=SAFETY_CMD_MEDICINE_STATE;
     }
-    char payload[384] = {0};
+    char payload[512] = {0};
     if (!cJSON_PrintPreallocated(paras,payload,sizeof(payload),0)) {cJSON_Delete(j);return;}
     if (code>=SAFETY_CMD_LIVING && code<=SAFETY_CMD_LIGHT && (living_validate(code,payload) || !cJSON_IsString(service) || strcmp(service->valuestring,IOTDA_SERVICE_ID))) code=0;
     if(cJSON_IsString(name)&&!strcmp(name->valuestring,"contact")) {
         code=cJSON_IsString(service)&&!strcmp(service->valuestring,IOTDA_SERVICE_ID)&&!local_contact_validate(payload)?SAFETY_CMD_CONTACT:0;
+    }
+    if(cJSON_IsString(name)&&cJSON_IsString(service)&&!strcmp(service->valuestring,IOTDA_SERVICE_ID)){
+        int care_code=!strcmp(name->valuestring,"set_care_policy")?SAFETY_CMD_CARE_POLICY:!strcmp(name->valuestring,"pause_care")?SAFETY_CMD_CARE_PAUSE:0;
+        if(care_code&&!care_cloud_validate(care_code,payload))code=care_code;
     }
     if (code) {
         int rc = safety_command_submit_payload(code, "cloud", payload, &r->command);

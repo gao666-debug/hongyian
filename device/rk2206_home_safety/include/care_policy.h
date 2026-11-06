@@ -8,5 +8,9 @@ int care_policy_mode(unsigned epoch);
 int care_policy_mode_at(unsigned epoch,uint64_t now);
 int care_policy_pause(unsigned minutes,uint64_t now);
 int care_policy_apply(const char *json);
+unsigned care_policy_timeout(unsigned fallback);
+unsigned care_policy_serial(void);
+int care_cloud_validate(int code,const char *json);
+int care_cloud_execute(int code,const char *json,uint64_t now);
 int care_policy_json(char *out, int size, unsigned epoch, uint64_t now);
 #endif

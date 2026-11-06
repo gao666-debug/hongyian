@@ -3,7 +3,7 @@
 #define SAFETY_RUNTIME_H
 #include <stdbool.h>
 #include <stdint.h>
-#define SAFETY_FW "v3.5.57"
+#define SAFETY_FW "v3.5.58"
 #define SAFETY_CMD_ACK 1
 #define SAFETY_CMD_MUTE 2
 #define SAFETY_CMD_LIVING 3
@@ -15,6 +15,8 @@
 /* 解除静音（语音“取消静音”用）；不影响报警状态本身。 */
 #define SAFETY_CMD_UNMUTE 9
 #define SAFETY_CMD_CONTACT 10
+#define SAFETY_CMD_CARE_POLICY 11
+#define SAFETY_CMD_CARE_PAUSE 12
 #define SAFETY_EVENT_COUNT 16
 /* Locks are created before any application task starts. */
 int safety_runtime_init(void);
@@ -47,7 +49,7 @@ typedef struct
     unsigned int id;
     int code, result;
     char source[8];
-    char payload[384];
+    char payload[512];
 } safety_command_t;
 int safety_command_submit(int code, const char *source, unsigned int *id);
 int safety_command_submit_payload(int code, const char *source, const char *payload, unsigned int *id);

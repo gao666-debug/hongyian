@@ -25,8 +25,15 @@ struct LocalControl {
     catch(_){this.source='';this.message='暂时无法核对账号权限。离线本地热点可使用浏览器 NFC 页面，并由板端确认配对。';return false;}
   }
   private async connect():Promise<void>{
-    if(this.busy){return;}const ip=this.address.trim();if(!localIpv4(ip)){this.message='请输入主板的局域网 IPv4 地址，例如 192.168.2.1';return;}
-    this.busy=true;try{if(await this.verify()){DeviceLink.localIp=ip;this.source='http://'+ip+':8080/';this.message='本地连接 · 按网页提示到主板确认配对。'}}finally{this.busy=false;}
+    if(this.busy){return;}const ip=this.address.trim();if(!localIpv4(ip)){this.message='请输入主板的局域网 IPv4 地址，例如192.168.2.1';return;}
+    this.busy=true;
+    try{if(await this.verify()){
+      const client=http.createHttp();let identity:LocalIdentity={};
+      try{const result=await client.request('http://'+ip+':8080/status',{method:http.RequestMethod.GET,expectDataType:http.HttpDataType.STRING,connectTimeout:5000,readTimeout:5000,usingCache:false});if(result.responseCode!==200){throw new Error('主板状态读取失败');}identity=JSON.parse(result.result as string) as LocalIdentity;}finally{client.destroy();}
+      if(!this.active||DeviceSession.backend.token!==this.token){return;}
+      if(identity.device_id!==DeviceSession.backend.device){throw new Error('该地址与家庭主板不匹配，或固件未上报设备身份');}
+      DeviceLink.localIp=ip;this.source='http://'+ip+':8080/';this.message='本地连接 · 按网页提示到主板确认配对。';
+    }}catch(error){this.source='';this.message=(error as Error).message+'。请核对同一 Wi-Fi 和主板 IP。';}finally{this.busy=false;}
   }
   build(){Column(){
     Row(){Button('返回').height(48).backgroundColor(Color.Transparent).fontColor(CareTheme.primary).onClick(()=>{router.back();});Text('主板本地控制').fontSize(22).fontWeight(FontWeight.Bold).fontColor(CareTheme.ink).layoutWeight(1)}.width('100%').padding(12)

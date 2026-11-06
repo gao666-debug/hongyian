@@ -17,6 +17,9 @@ int local_message_seen(unsigned id,int from_board);
 int local_messages_json(char *out,int n);
 void local_message_view(int *selected,int *board,int *reply,int *confirmed);
 void local_message_select(void);
+#define LOCAL_TEXT_BYTES 120
+int local_text_valid(const char *text);
+int local_message_text(unsigned client,int family,unsigned reply_to,const char *text,const char *author,const char *request_id,unsigned epoch,uint64_t now,unsigned *id);
 void local_message_confirm(void);
 int local_contact_validate(const char *payload);
 int local_contact_execute(const char *payload,unsigned epoch,uint64_t now);

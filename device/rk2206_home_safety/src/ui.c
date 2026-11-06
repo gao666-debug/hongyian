@@ -449,8 +449,8 @@ void ui_show_living(const living_config_t *draft,int field,int result)
 
 static void ui_show_contact(void) {
     int selected,board,reply,confirmed;char text[100];
-    const char *sent[]={"暂无消息","我一切正常","请给我打电话","需要生活协助"};
-    const char *received[]={"等待家人回复","已收到消息","正在赶来","已联系人员协助"};
+    const char *sent[]={"暂无消息","我一切正常","请给我打电话","需要生活协助","网页文字消息"};
+    const char *received[]={"等待家人回复","已收到消息","正在赶来","已联系人员协助","收到文字消息"};
     local_message_view(&selected,&board,&reply,&confirmed);
     panel_begin(20,"颐鸿安 / 联系家人","本地");
     panel_text(0,8,30,304,24,"选择要发送的消息",UI_MUTED,LCD_WHITE,16);
