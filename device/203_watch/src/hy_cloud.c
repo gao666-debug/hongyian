@@ -46,6 +46,8 @@ int hy_cloud_online(void)
     return g_online;
 }
 
+#if !(defined(HY_HW_FIXED_AUTH) && (HY_HW_FIXED_AUTH == 1))
+/* 固定三元组模式下不需要本地 UTC 时间，函数会变成未使用 */
 static uint32_t hy_utc_now(void)
 {
     if (g_utc_valid == 0) {
@@ -53,6 +55,7 @@ static uint32_t hy_utc_now(void)
     }
     return g_utc_base + (uint32_t)((uapi_tcxo_get_ms() - g_utc_base_ms) / 1000ULL);
 }
+#endif
 
 static int hy_cloud_sync_time(void)
 {
@@ -77,6 +80,13 @@ static int hy_cloud_sync_time(void)
 /* 生成 ClientId 和 Password */
 static void hy_cloud_auth(char *client_id, char *password)
 {
+#if defined(HY_HW_FIXED_AUTH) && (HY_HW_FIXED_AUTH == 1)
+    /* 固定三元组：设备原始密钥丢失时的方案。
+     * clientId 里的时间戳必须与导出 password 时用的时间戳一致，
+     * 平台是按 clientId 里的时间戳重算 HMAC 再比对的。 */
+    (void)snprintf(client_id, HY_CLOUD_CID_LEN, "%s", HY_HW_FIXED_CLIENT_ID);
+    (void)snprintf(password, HY_CLOUD_PASS_LEN, "%s", HY_HW_FIXED_PASSWORD);
+#else
     char stamp[12];
     char hexbuf[65];
     uint8_t mac[32];
@@ -91,6 +101,7 @@ static void hy_cloud_auth(char *client_id, char *password)
     (void)snprintf(client_id, HY_CLOUD_CID_LEN, "%s_0_%d_%s",
                    HY_HW_DEVICE_ID, HY_HW_SIG_TYPE, stamp);
     (void)snprintf(password, HY_CLOUD_PASS_LEN, "%s", hexbuf);
+#endif
 }
 
 static int hy_cloud_mqtt_open(void)

@@ -831,6 +831,7 @@ static unsigned int s_sps;
 #define HY_LP_N     20                  /* 20 点滑动平均 ≈ 10Hz 低通 */
 #define HY_LAG_MIN  60                  /* 300ms -> 200bpm 上限 */
 #define HY_LAG_MAX  400                 /* 2s    -> 30bpm 下限 */
+#define HY_HOLD_MS 10000              /* 有效值保持 10 秒，超时清零 */
 #define HY_CORR_MIN 250                 /* 归一化相关度低于 0.25 就不认 */
 
 static int hr_from_buffer(uint32_t ir_min, uint32_t ir_max, int *amp_out, int *drift_out,
@@ -1261,12 +1262,31 @@ static void hr_recalc(void)
         }
 
         voted = hr_vote(est);
-        if (voted >= 40 && voted <= 200) {
-            g_hy.hr = voted;
-        } else {
-            g_hy.hr = 0;
+
+        /* 保持逻辑：算法每个窗口独立判决，手指微动就会把这个窗口判废。
+         * 直接上报会让心率在 88/0/122 之间跳，演示时很难看。
+         * 做法：只在"最近一次有效值"超过 10 秒没更新时才清零，
+         * 算法本身一行不改，精度不受影响。 */
+        {
+            static int last_hr = 0;
+            static uint32_t last_hr_ms = 0;
+            static int last_spo2 = 0;
+            static uint32_t last_spo2_ms = 0;
+            uint32_t now_ms = uapi_tcxo_get_ms();
+            int hr_new = (voted >= 40 && voted <= 200) ? voted : 0;
+            int spo2_new = (spo2_valid && spo2 >= 70 && spo2 <= 100) ? spo2 : 0;
+
+            if (hr_new > 0) {
+                last_hr = hr_new;
+                last_hr_ms = now_ms;
+            }
+            if (spo2_new > 0) {
+                last_spo2 = spo2_new;
+                last_spo2_ms = now_ms;
+            }
+            g_hy.hr = (last_hr > 0 && (now_ms - last_hr_ms) < HY_HOLD_MS) ? last_hr : 0;
+            g_hy.spo2 = (last_spo2 > 0 && (now_ms - last_spo2_ms) < HY_HOLD_MS) ? last_spo2 : 0;
         }
-        g_hy.spo2 = (spo2_valid && spo2 >= 70 && spo2 <= 100) ? spo2 : 0;
         printf("[hy-sensor] 心率=%d bpm | 自相关=%d(相关度0.%03d) 峰值=%d(间隔%d个) 本窗=%d%s | "
                "幅度=%d 漂移=%d | Maxim=%d/%d 血氧=%d%%(%d)\r\n",
                g_hy.hr, hr_ac, corr, hr_pk, ivn, est, moving ? " 运动中" : "",

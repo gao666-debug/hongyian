@@ -14,8 +14,10 @@
 
 #include "cfg.h"
 #include "sensors.h"
+#include "remote.h"
 #include "net.h"
 #include "iotda.h"
+#include "sle_rx.h"     /* 星闪：接收手表数据 */
 
 #include "cmsis_os2.h"
 #include "common_def.h"
@@ -40,6 +42,13 @@ static td_s32 app_task(td_void *param)
 
     /* 先起采集任务，保证上报时一定有数据 */
     sensors_start();
+
+    /* 遥控模块当前只做电平监视，验证通过后再接紧急求助。
+     * 433 那条线已搁置，先不启动，避免 2 秒一次的 hb 日志刷屏。 */
+    /* remote_start(); */
+
+    /* 星闪接收：独立线程，先起来等手表连上来；Wi-Fi 在后面阻塞联网也不影响它 */
+    sle_rx_start();
 
     osal_printk(APP_LOG "connecting wifi...\r\n");
     (void)net_connect();

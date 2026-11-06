@@ -11,6 +11,7 @@
  */
 #include "lcd_bringup.h"
 #include "hy_sensor.h"
+#include "sle_tx.h"     /* 星闪上报：每秒把 g_hy 发给主板 */
 #include "hy_cloud_cfg.h"
 
 #if HY_CLOUD_ENABLE
@@ -113,6 +114,9 @@ static void hy_sensor_entry(void)
         printf("[hy-sensor] 上云任务创建失败\r\n");
     }
 #endif
+
+    /* 星闪上报：独立线程，与本地上云并行，互不阻塞 */
+    sle_tx_start();
 
     osal_kthread_unlock();
 }

@@ -28,5 +28,7 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/lcd_bringup.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/bsp_iic.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/algorithm.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/sle_tx.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/sle_tx_adv.c"
         PARENT_SCOPE)
 endif()

@@ -4,6 +4,8 @@ set(SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/sensors.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/net.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/iotda.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/remote.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sle_rx.c"
     PARENT_SCOPE)
 
 set(PUBLIC_HEADER
@@ -12,4 +14,5 @@ set(PUBLIC_HEADER
     "${CMAKE_CURRENT_SOURCE_DIR}/sensors.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/net.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/iotda.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/remote.h"
     PARENT_SCOPE)
