@@ -1,3 +1,4 @@
+import { DeviceLink } from '../services/DeviceLink';
 import { http } from '@kit.NetworkKit';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
@@ -289,7 +290,7 @@ struct Index {
       this.appVersion = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).versionName;
     } catch (error) { this.appVersion = ''; }
   }
-  onPageShow(): void { this.visible = true; this.startTimer(); if (this.loggedIn && !this.demo) { this.refresh(true); this.startPush(); } }
+  onPageShow(): void { this.openDeviceLink(); if(this.loggedIn&&!this.demo&&!this.api.token){this.expiredSession(this.generation);} this.visible = true; this.startTimer(); if (this.loggedIn && !this.demo) { this.refresh(true); this.startPush(); } }
   onPageHide(): void { this.visible = false; this.stopTimer(); Voice.stop(); this.api.stopPush(); this.generation++; this.polling = false; this.detailsPolling = false; this.healthPolling = false; this.familyPolling = false; this.loading = false; }
   aboutToDisappear(): void { this.onPageHide(); }
   private async initialize(): Promise<void> {
@@ -309,7 +310,8 @@ struct Index {
     this.notificationsEnabled=await AlarmNotifications.inspect();
     this.startTimer();
     // Resume the last account silently so switching between accounts survives an app restart.
-    this.restoreLastAccount();
+    await this.restoreLastAccount();
+    this.sessionReady=true;this.openDeviceLink();
   }
   private async restoreLastAccount(): Promise<void> {
     const usable = this.accounts.filter((item:SavedAccount):boolean=>item.username===this.userDraft&&item.server===this.serverDraft&&Accounts.usable(item,Date.now()))
@@ -333,7 +335,7 @@ struct Index {
   private startTimer(): void {
     if (this.timer !== -1 || !this.visible) { return; }
     this.timer = setInterval(() => {
-      this.now = Date.now(); this.ticks++;
+      this.now = Date.now(); this.ticks++;this.openDeviceLink();
       if(this.loggedIn&&!this.demo&&NotificationRoute.key) {
         if(NotificationRoute.device!==this.api.device){NotificationRoute.key='';this.error='请用对应家庭的账号查看该报警';}
         else {const event=this.alarms.find((record:AlarmEvent)=>alarmKey(record)===NotificationRoute.key);
@@ -409,6 +411,7 @@ struct Index {
     if (this.demo) { this.received = Date.now(); return; }
     if (!this.loggedIn || !this.visible) { return; }
     const generation = this.generation;
+    if(this.api.device===''){this.familyMessage='尚未加入家庭，请在家庭与账号中接受邀请';return;}
     if(!this.allowed('view')){
       if(!this.familyRole){await this.refreshFamily();}
       if(generation===this.generation){await this.refreshEvents(generation);}
@@ -785,6 +788,21 @@ struct Index {
     this.doorValue = -1; this.doorEnabled = -1; this.doorValid = -1;
     this.activityReport=null;this.reportMessage='';this.living=null;this.medicineNotice=false;this.medicineSeen=[];this.livingOpen=false;this.acknowledgedAlarms=[];this.healthBoot=-1;this.healthUp=-1;this.healthKnown = false; this.healthReceived = 0; this.healthSignature = ''; this.firmware = ''; this.muted = false; this.alarms = []; this.hours = []; this.days = []; this.activityTotal = 0; this.alarmTotal = 0;
   }
+  private linkOpening:boolean=false;
+  private sessionReady:boolean=false;
+  private async openDeviceLink():Promise<void>{
+    if(!this.sessionReady||!DeviceLink.pending||this.linkOpening){return;}
+    if(!this.loggedIn||this.demo){this.error='请先登录，登录后验证 NFC 设备的家庭权限';this.settingsOpen=true;return;}
+    this.linkOpening=true;const id=DeviceLink.pending,token=this.api.token;
+    try{
+      const family=await this.api.refreshHousehold();if(token!==this.api.token||!this.visible){return;}
+      const node=family.devices.find((item:DistributedNode)=>item.device_id===id);
+      if(DeviceLink.pending===id){DeviceLink.pending='';}
+      if(!node||!(family.permissions||[]).includes('view')){this.error='当前账号没有这台 NFC 设备的查看权限';this.navigate(3);return;}
+      if(node.kind==='gateway'){router.pushUrl({url:DeviceLink.localIp?'pages/LocalControl':'pages/DeviceContact'});}
+      else{router.pushUrl({url:'pages/Nodes',params:{kind:node.kind==='wearable'?'wearable':'environment'}});}
+    }catch(error){this.error='设备链接验证失败：'+(error as Error).message;}finally{this.linkOpening=false;}
+  }
   private async signIn(server: string, username: string, password: string): Promise<void> {
     await this.api.login(server, username, password);
     this.applySessionState(username, password);
@@ -795,6 +813,7 @@ struct Index {
     await this.refreshFamily();
     await this.refresh(true); this.startPush();
     await this.rememberAccount(username);
+    this.openDeviceLink();
   }
   private async rememberAccount(username: string): Promise<void> {
     if (!this.api.token || !username) { return; }
@@ -1233,6 +1252,9 @@ struct Index {
       else if($$.action==='environment'||$$.action==='wearable'){router.pushUrl({url:'pages/Nodes',params:{kind:$$.action}});}
       else if($$.action==='camera'){router.pushUrl({url:'pages/Camera'});}
       else if($$.action==='messages'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/Messages'});}else{this.openConnection();}}
+      else if($$.action==='accounts'){router.pushUrl({url:'pages/AccountCenter',params:{server:this.serverDraft}});}
+      else if($$.action==='localcontrol'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/LocalControl'});}else{this.openConnection();}}
+      else if($$.action==='devicecontact'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/DeviceContact'});}else{this.openConnection();}}
       else if($$.action==='connection'){this.openConnection();}
       else if($$.action==='profile'){this.editProfile();}
       else {this.detail=$$.action;this.pageScroller.scrollTo({xOffset:0,yOffset:0});if($$.action==='members'){this.refreshFamily();}}
@@ -1637,6 +1659,12 @@ struct Index {
       this.section({title:'账户与帮助',subtitle:''})
       Column(){
         this.entryRow({icon:$r('app.media.home'),title:'家人消息',value:'好友与聊天',action:'messages'})
+        Divider().color(CareTheme.line).strokeWidth(0.5)
+        this.entryRow({icon:$r('app.media.home'),title:'家庭与账号',value:'邀请与登录设备',action:'accounts'})
+        Divider().color(CareTheme.line).strokeWidth(0.5)
+        this.entryRow({icon:$r('app.media.device'),title:'主板本地控制',value:'无活动与配对',action:'localcontrol'})
+        Divider().color(CareTheme.line).strokeWidth(0.5)
+        this.entryRow({icon:$r('app.media.device'),title:'主板联系消息',value:'消息与回复',action:'devicecontact'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.home'),title:'家庭成员',value:this.familyRole==='owner'?'邀请与权限':'查看家庭设备',action:'members'})
         Divider().color(CareTheme.line).strokeWidth(0.5)

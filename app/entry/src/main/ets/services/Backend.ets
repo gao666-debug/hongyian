@@ -53,6 +53,7 @@ export class Backend {
   applyFamily(family: DistributedFamily): void {
     this.family = family;
     const nodes = (family.devices || []).filter((node: DistributedNode) => this.deviceIds.includes(node.device_id));
+    if (!nodes.length) { this.device=''; return; }
     const gateway = gatewayId(nodes);
     if (!gateway) { throw new Error('家庭未配置唯一守护主机，请联系管理员'); }
     this.device = gateway;
@@ -118,6 +119,7 @@ export class Backend {
     this.deviceIds = login.device_ids || [];
     try {
       if (login.devices && login.devices.length) { this.applyFamily({devices:login.devices}); }
+      else if (!this.deviceIds.length) { this.family={devices:[]};this.device=''; }
       else { await this.refreshHousehold(); }
     } catch (error) { this.token='';this.deviceIds=[];this.family={devices:[]};this.tokenExpiresAt=0;throw new Error((error as Error).message || '无法识别家庭主机'); }
   }
@@ -145,6 +147,7 @@ export class Backend {
   }
   startPush(notify: (message: Push) => void, link: (online: boolean) => void): void {
     this.stopPush(); this.notify = notify; this.link = link;
+    if(!this.token||!this.device){link(false);return;}
     this.openPush(this.generation);
   }
   private retry(generation: number): void {
@@ -152,6 +155,7 @@ export class Backend {
     this.timer = setTimeout(() => { this.timer = -1; this.openPush(generation); }, 5000);
   }
   private async openPush(generation: number): Promise<void> {
+    if(!this.token||!this.device){return;}
     try {
       const reply = await this.request(`/api/v1/ws-ticket?device_id=${encodeURIComponent(this.device)}`, http.RequestMethod.POST, '{}');
       if (generation !== this.generation || !this.token) { return; }

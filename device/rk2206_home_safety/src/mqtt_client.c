@@ -1,3 +1,4 @@
+#include "local_access.h"
 /*
  * Copyright (c) 2024 iSoftStone Education Co., Ltd.
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -280,6 +281,12 @@ static int stats_message_json(char *payload, int n)
     payload[len] = '}'; payload[len + 1] = 0;
     return 0;
 }
+static int publish_contact(MQTTClient *client,char *payload,int size){
+ unsigned id,revision;int rc=local_message_cloud_next(payload,size,&id,&revision);
+ if(rc<0)return FAILURE;if(!rc)return SUCCESS;
+ if(publish(client,"$oc/devices/" IOTDA_DEVICE_ID "/sys/messages/up",payload,QOS1)!=SUCCESS)return FAILURE;
+ local_message_cloud_done(id,revision);return SUCCESS;
+}
 static int publish_pending(MQTTClient *client, char *payload, int n)
 {
     alarm_item_t a;
@@ -384,6 +391,7 @@ static void mqtt_task(void *arg)
             {
                 if (publish_responses(&client) != SUCCESS) { printf("[iotda] exit stage=command-response\r\n"); break; }
                 if (publish_pending(&client, payload, sizeof(payload)) != SUCCESS) { printf("[iotda] exit stage=alarm-publish\r\n"); break; }
+                if(publish_contact(&client,payload,sizeof(payload))!=SUCCESS){printf("[iotda] contact publish retry required\r\n");break;}
                 safety_config_t cfg;
                 safety_config_get(&cfg);
                 uint64_t now = LOS_TickCountGet();

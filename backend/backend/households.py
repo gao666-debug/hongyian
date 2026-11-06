@@ -72,7 +72,7 @@ class Households:
         def household(user=Depends(session)):
             with self.store.connection() as db:
                 member=db.execute('SELECT home,role FROM home_members WHERE username=?',(user['username'],)).fetchone()
-                if not member: raise HTTPException(403,'No household membership')
+                if not member: return envelope({'name':'尚未加入家庭','role':'','permissions':[],'devices':[],'members':[],'membership':False})
                 nodes=[dict(r) for r in db.execute('SELECT device AS device_id,kind,name,room FROM home_devices WHERE home=?',(member['home'],)) if r['device_id'] in self.configured_ids()]
                 members=[dict(r) for r in db.execute('SELECT username,role FROM home_members WHERE home=?',(member['home'],))] if member['role']=='owner' else [{'username':user['username'],'role':member['role']}]
             permissions=sorted(ROLE_PERMISSIONS.get(member['role'],set()))
@@ -108,7 +108,7 @@ class Households:
             if not owner or owner['role']!='owner': raise HTTPException(403,'Owner required')
             target=db.execute('SELECT home,role FROM home_members WHERE username=?',(username,)).fetchone()
             if not target or target['home']!=owner['home']: raise HTTPException(404,'Member not found')
-            if username==actor or target['role']=='owner': raise HTTPException(409,'Administrator account is protected')
+            if username==actor or username==self.settings.username or target['role']=='owner': raise HTTPException(409,'Administrator account is protected')
             return owner['home']
 
         def revoke_sessions(db, username):

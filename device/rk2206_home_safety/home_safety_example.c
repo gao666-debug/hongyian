@@ -43,6 +43,8 @@
 #include "rgb.h"
 #include "safety_runtime.h"
 #include "living.h"
+#include "care_policy.h"
+#include "local_access.h"
 #include "sntp_client.h"
 #include "safety_stats.h"
 #include "sht30.h"
@@ -128,6 +130,12 @@ static void nfc_init_thread(void *arg)
 {
     /* NT3H uses EI2C2_M0 (PD5/PD6), not the PA0/PA1 sensor bus. */
     nfc_tag_init();
+    for (;;) {
+        char ip[16] = {0};
+        net_server_local_ip(ip, sizeof(ip));
+        if (ip[0]) nfc_tag_set_ipv4(ip);
+        LOS_TaskDelay(5000);
+    }
 }
 
 /***************************************************************
@@ -252,6 +260,7 @@ static void safety_monitor_thread(void *arg)
          prev_alarm[5] = {0};
     int ids[5] = {0};
     uint64_t starts[5] = {0}, beep_start = 0;
+    int previous_care_mode = 1;
     bool door_seeded = false, noact_warned = false, env_alarm = false;
     monitor_care_t care = {0};
     unsigned int door_count = 0, loops = 0;
@@ -301,6 +310,9 @@ static void safety_monitor_thread(void *arg)
         if (key == KEY_UP)
             help_on = !help_on;
         else if (key == KEY_DOWN) {
+            if(page==5 && !g_alarm && !help_on && !fall.active) {local_message_select();living_key=true;}
+            else if(page==6 && !g_alarm && !help_on && !fall.active) {local_pair_revoke();living_key=true;}
+            else {
             living_silence();
             if (page == 4 && edit_field >= 0 && !g_alarm) {
                 living_key=true;
@@ -319,15 +331,26 @@ static void safety_monitor_thread(void *arg)
                     edit_result=living_execute(SAFETY_CMD_MEDICINE_STATE,payload,sntp_get_epoch());
                 }
             } else mute_forced = true;
+            }
         }
         else if (key == KEY_LEFT)
         {
-            page = (page + 1) % 5;
+            page = (page + 1) % 7;
             edit_field=-1;edit_result=-1;
             /* Display worker will render the latest requested page. */
         }
         else if (key == KEY_RIGHT)
         {
+            if(page>=5 && !g_alarm && !help_on && !fall.active) {
+                living_key=true;
+                if(page==6)local_pair_approve(now);
+                else {
+                    int selected,board,reply,confirmed;
+                    local_message_view(&selected,&board,&reply,&confirmed);
+                    if(reply&&!confirmed)local_message_confirm();
+                    else local_message_board(selected,sntp_get_epoch(),now);
+                }
+            } else {
             living_status_t pending;living_get(&pending);
             k6_action_t action=k6_action(page,edit_field,g_alarm||help_on||fall.active,
                                          living_pending_slot(&pending)>=0,false);
@@ -353,6 +376,7 @@ static void safety_monitor_thread(void *arg)
             }
         }
 
+        }
         safety_command_t cmd;
         bool have_cmd = safety_command_take(&cmd) != 0;
         int command_result=0;
@@ -368,13 +392,22 @@ static void safety_monitor_thread(void *arg)
                 help_on=true;mute_forced=false;beep_start=now;
                 printf("[cloud] SOS applied: local help alarm active\r\n");
             }
+            else if(cmd.code==SAFETY_CMD_UNMUTE) {
+                /* Voice "取消静音": re-arm beep while an alarm is still active. */
+                mute_forced=false;beep_start=now;
+                printf("[voice] mute released; alarm state unchanged\r\n");
+            }
+            else if(cmd.code==SAFETY_CMD_CONTACT)command_result=local_contact_execute(cmd.payload,sntp_get_epoch(),now);
             else command_result=living_execute(cmd.code,cmd.payload,sntp_get_epoch());
         }
+        /* 语音“看记录/回主页”：只在不编辑设置页时切换，避免打断本地编辑 */
+        int voice_page=su03t_take_page();
+        if(voice_page>=0 && edit_field<0) page=voice_page;
         key_id_t long_key=key_take_long_event();
 #if KEY_ADC_DIAGNOSTIC
         long_key=KEY_NONE; /* Do not reboot or clear history on an ADC misclassification. */
 #endif
-        if(long_key==KEY_RIGHT) {
+        if(long_key==KEY_RIGHT && page<5) {
             k6_action_t action=k6_action(page,edit_field,g_alarm||help_on||fall.active,false,true);
             if(action==K6_CLEAR_EVENTS) {
                 event_log_clear();events_dirty=true;
@@ -405,6 +438,16 @@ static void safety_monitor_thread(void *arg)
         wireless=0; /* Keep diagnostic page visible, even with noisy receiver lines. */
 #endif
         if (wireless & WIRELESS_SOS) {
+            if(page>=5 && !g_alarm && !help_on && !fall.active) {
+                living_key=true;
+                if(page==6)local_pair_approve(now);
+                else {
+                    int selected,board,reply,confirmed;
+                    local_message_view(&selected,&board,&reply,&confirmed);
+                    if(reply&&!confirmed)local_message_confirm();
+                    else local_message_board(selected,sntp_get_epoch(),now);
+                }
+            } else {
             living_status_t pending;living_get(&pending);
             if (help_on) {
                 help_on=false;
@@ -441,8 +484,15 @@ static void safety_monitor_thread(void *arg)
             door_prev = door;
         }
         door_seeded = door_valid;
+        int care_mode = care_policy_mode_at(sntp_get_epoch(),now);
+        if (care_mode == 0 || (previous_care_mode != 1 && care_mode == 1)) {
+            memset(&care, 0, sizeof(care));
+            care.last_activity_ms = now;
+            care.armed = care_mode == 1 && v->body_valid;
+        }
+        previous_care_mode = care_mode;
         monitor_care_result_t care_result = monitor_care_step(&care, now,
-            v->body_valid, v->body, key != KEY_NONE || long_key != KEY_NONE,
+            v->body_valid && care_mode != 0, v->body, key != KEY_NONE || long_key != KEY_NONE,
             door_changed, cfg.noact_ms);
         unsigned int inactive = care_result.inactive_ms;
         /* A sensor outage cannot falsely end a previously detected environment alarm. */
@@ -488,7 +538,9 @@ static void safety_monitor_thread(void *arg)
                 changed = true;
             }
         }
-        new_voice = safety_voice_select(alarms, rising,
+        bool audible_alarms[5] = {help_on, fall.active, gas, noact_alert && care_mode == 1, env};
+        bool audible_any = help_on || fall.active || gas || env || (noact_alert && care_mode == 1);
+        new_voice = safety_voice_select(audible_alarms, rising,
                          (have_cmd && cmd.code<=SAFETY_CMD_MUTE) || ((wireless & (WIRELESS_ACK|WIRELESS_MUTE)) && !(wireless & WIRELESS_SOS)) || (!living_key && (key == KEY_DOWN || key == KEY_RIGHT))) - 1;
         if (new_voice >= 0)
         {
@@ -501,8 +553,8 @@ static void safety_monitor_thread(void *arg)
             }
             /* Speech is scheduled below, after mute and medicine state are known. */
         }
-        bool beep = any && !mute_forced && (now - beep_start < cfg.mute_ms);
-        living_tick(sntp_get_epoch(),now,v->light,v->light_valid,any || noact_warning);
+        bool beep = audible_any && !mute_forced && (now - beep_start < cfg.mute_ms);
+        living_tick(sntp_get_epoch(),now,v->light,v->light_valid,audible_any || (noact_warning && care_mode == 1));
         living_status_t ls;living_get(&ls);
         for(int slot=0;slot<3;slot++) {
             if(ls.slot_state[slot]!=last_med_state[slot] || ls.dose_day!=last_dose_day) {
@@ -516,14 +568,14 @@ static void safety_monitor_thread(void *arg)
         last_dose_day=ls.dose_day;
         unsigned medicine_voice_mask=0;
         for(int slot=0;slot<3;slot++)if(ls.slot_state[slot]==3)medicine_voice_mask|=1U<<slot;
-        bool voice_alarms[5]={help_on,fall.active,gas,noact_alert && v->body_valid,
+        bool voice_alarms[5]={help_on,fall.active,gas,noact_alert && v->body_valid && care_mode == 1,
                               env && v->env_valid};
         su03t_process_voices(voice_alarms,medicine_voice_mask,living_beep(now),
-                             any && !beep,now);
-        bool care_beep = noact_warning && !noact_alert && !any &&
+                             audible_any && !beep,now);
+        bool care_beep = care_mode == 1 && noact_warning && !noact_alert && !any &&
                          ((inactive - cfg.noact_ms) / 1000U) % 4U == 0;
-        monitor_outputs_t outputs = monitor_outputs(any, help_on, fall.active || gas,
-            noact_warning, beep, care_beep, ls.light_owner == 2,
+        monitor_outputs_t outputs = monitor_outputs(audible_any, help_on, fall.active || gas,
+            noact_warning && care_mode == 1, beep, care_beep, ls.light_owner == 2,
             living_beep(now), ls.night_on);
         beep_set_state(outputs.beep);
         alarm_light_set_gpio(outputs.alarm_light);
@@ -562,7 +614,10 @@ static void safety_monitor_thread(void *arg)
         }
         if (have_cmd)
             safety_command_done(&cmd, command_result);
+        char voice_text[24];
         const char *text = status ? event_log_tag_cn(tags[status - 1]) : noact_warning ? "无活动" : "正常";
+        /* 报警状态优先显示，其余情况用 3 秒内的语音动作提示覆盖 */
+        if (!status && su03t_note(voice_text, sizeof(voice_text), now)) text = voice_text;
         ui_present(page,&state,text,edit_field>=0?&draft:NULL,edit_field,edit_result,
                    events_dirty||changed);
         if (loops % PRINT_EVERY_LOOPS == 0)
@@ -658,6 +713,8 @@ static void home_safety_init_task(void *arg)
     if (safety_runtime_init() != 0)
         return;
     living_init();
+    care_policy_init();
+    local_access_init();
     printf("[home_safety] runtime ready\r\n");
     mqtt_config_init();
     event_log_init();

@@ -9,7 +9,7 @@ cc -DSAFETY_HOST_TEST -DVOICE_DEDICATED_IDX="${SAFETY_TEST_VOICE_PROFILE:-0}" -D
  -I"$project_dir/tests/stubs" -I"$project_dir/include" -I"$repo_dir/third_party/cJSON" \
  -I"$repo_dir/base/iot_hardware/peripheral/interfaces/kits" \
  -I"$repo_dir/third_party/paho_mqtt/MQTTClient-C/src" -I"$repo_dir/third_party/paho_mqtt/MQTTPacket/src" \
- "$project_dir/tests/test_safety.c" "$project_dir/src/living.c" "$project_dir/src/cloud_commands.c" "$project_dir/src/safety_runtime.c" "$project_dir/src/safety_logic.c" \
+ "$project_dir/tests/test_safety.c" "$project_dir/src/local_access.c" "$project_dir/src/care_policy.c" "$project_dir/src/living.c" "$project_dir/src/cloud_commands.c" "$project_dir/src/safety_runtime.c" "$project_dir/src/safety_logic.c" \
  "$project_dir/src/sht30.c" "$project_dir/src/mpu6050.c" "$project_dir/src/bh1750.c" "$project_dir/src/su_03t.c" "$project_dir/src/ui.c" "$project_dir/src/safety_stats.c" "$project_dir/src/event_log.c" \
  "$repo_dir/third_party/cJSON/cJSON.c" "$repo_dir/third_party/paho_mqtt/MQTTClient-C/src/MQTTClient.c" \
  "$repo_dir/third_party/paho_mqtt/MQTTClient-C/src/liteOS/MQTTLiteOS.c" \
@@ -18,3 +18,9 @@ cc -DSAFETY_HOST_TEST -DVOICE_DEDICATED_IDX="${SAFETY_TEST_VOICE_PROFILE:-0}" -D
 
 cc -std=c99 -Wall -Wextra -Werror -I"$project_dir/include" "$project_dir/tests/test_voice_policy.c" -o "$build_dir/test_voice_policy"
 "$build_dir/test_voice_policy"
+
+cc -std=c99 -Wall -Wextra -Wno-unused-parameter -fsanitize=undefined -fno-sanitize-recover=all -I"$project_dir/include" -I"$project_dir/tests/stubs" -I"$repo_dir/third_party/cJSON" "$project_dir/tests/test_care_policy.c" "$project_dir/src/care_policy.c" "$repo_dir/third_party/cJSON/cJSON.c" -lm -o "$build_dir/test_care_policy"
+"$build_dir/test_care_policy"
+
+cc -std=c99 -Wall -Wextra -Wno-misleading-indentation -fsanitize=undefined -fno-sanitize-recover=all -I"$project_dir/include" -I"$repo_dir/third_party/cJSON" "$project_dir/tests/test_local_access.c" "$project_dir/src/local_access.c" "$repo_dir/third_party/cJSON/cJSON.c" -lm -o "$build_dir/test_local_access"
+"$build_dir/test_local_access"

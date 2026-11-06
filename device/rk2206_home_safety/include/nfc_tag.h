@@ -18,8 +18,10 @@
 
 /*
  * 把板载 NFC 标签(NT3H1201)写成一个“求助/信息”标签：
- * 手机开启 NFC 贴一下，可读到文本信息 + 打开状态页链接
+ * 手机开启 NFC 贴一下，打开当前网络地址的本地页面。
  */
 void nfc_tag_init(void);
+/* NFC task only. Unchanged addresses are not rewritten. */
+int nfc_tag_set_ipv4(const char *ip);
 
 #endif /* __NFC_TAG_H__ */

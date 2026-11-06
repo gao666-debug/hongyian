@@ -57,7 +57,7 @@ class BatchNotes(Note):
     event_keys: list[str] = Field(min_length=1,max_length=100)
 
 class DeviceMessage(StrictModel):
-    name: Literal['alarm_event','device_health','activity_stats']
+    name: Literal['alarm_event','device_health','activity_stats','contact_event']
     id: str | None = Field(default=None,max_length=256)
     content: dict
 
@@ -209,6 +209,7 @@ def create_app(settings=None, cloud=None):
                 if name in ('ack','mute'): health['mute']=1
                 if name=='sos': health['mute']=0
                 result=0
+                if name=='contact':result=device_contacts.mock_execute(row['device'],json.loads(row['body'])['paras'])
                 if name in ('set_living','confirm_medicine','set_medicine_plan','set_medicine_state','set_light'):
                     params=json.loads(row['body'])['paras']
                     life,result=mock_living_command(health.get('living'),name,params,int(time.time()),props.get('light',100),props.get('alarm',0))
@@ -238,7 +239,7 @@ def create_app(settings=None, cloud=None):
         if tasks:
             await asyncio.gather(*tasks,return_exceptions=True)
 
-    app = FastAPI(title='ElderCare App Backend',version='1.10.0',lifespan=lifespan)
+    app = FastAPI(title='ElderCare App Backend',version='1.12.0',lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.hub = hub
@@ -258,9 +259,13 @@ def create_app(settings=None, cloud=None):
     @app.get('/healthz')
     def healthz():
         return envelope({'status':'ready','cloud_configured':provider is not None,'push_mode':'ws',
-                         'api_version':'1.10.0','camera_transport':'jpeg-relay'})
+                         'api_version':'1.12.0','camera_transport':'jpeg-relay'})
 
     homes.install(app, session, envelope)
+    from .accounts import Accounts
+    accounts = Accounts(store,settings)
+    app.state.accounts = accounts
+    accounts.install(app, session, envelope)
     from .messaging import Messaging
     chats = Messaging(store, settings)
     app.state.chats = chats
@@ -268,6 +273,10 @@ def create_app(settings=None, cloud=None):
     from .camera import CameraService
     cameras = CameraService(store, settings, homes)
     cameras.install(app, session, envelope)
+    from .device_contacts import DeviceContacts
+    device_contacts=DeviceContacts(store,settings,homes)
+    app.state.device_contacts=device_contacts
+    device_contacts.install(app,session,envelope,run_command,tasks,command_data)
     app.state.cameras = cameras
 
     @app.post('/api/v1/auth/login')
@@ -280,6 +289,7 @@ def create_app(settings=None, cloud=None):
         attempts.append(now)
         token = store.login(body.username,body.password,settings.token_seconds)
         if not token: raise HTTPException(401,'Invalid username or password')
+        accounts.record_session(token,request.headers.get('User-Agent',''))
         return envelope({'access_token':token,'token_type':'Bearer','expires_in':settings.token_seconds,
                          'username':body.username,'device_ids':homes.device_ids(body.username),
                          'devices':homes.describe(body.username),'role':homes.role(body.username),
@@ -632,6 +642,10 @@ def create_app(settings=None, cloud=None):
 
     async def ingest(device,message):
         check_device(device)
+        if message.name=='contact_event':
+            result=device_contacts.ingest(device,message.content)
+            if not result['duplicate']:await publish(device,'device_contact',result)
+            return envelope(result)
         try:
             model = {'alarm_event':Alarm,'device_health':Health,'activity_stats':Stats}[message.name]
             data = model.model_validate(message.content).model_dump(mode='json',by_alias=True)
