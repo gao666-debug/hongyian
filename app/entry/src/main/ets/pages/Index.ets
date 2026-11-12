@@ -2167,7 +2167,13 @@ struct Index {
         }.width('100%').padding(14).backgroundColor(BG).borderRadius(12).alignItems(HorizontalAlign.Start)
         Button('添加其他账号',{type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).width('100%').borderRadius(12).onClick(()=>{this.userDraft='';this.passwordDraft='';this.settingsOpen=true;})
       }
-      Button('查看家庭设备', {type:ButtonType.Normal}).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).constraintSize({minHeight:48}).width('100%').borderRadius(12).onClick(()=>{this.detail='';this.navigate(3);})
+      if(!this.loggedIn){
+        Text(this.demo?'演示模式下不读取真实成员。要看已授权的家人账号，请先用家庭账号登录。':'登录家庭账号后，这里会显示同家庭的成员与其权限。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
+        Button('登录家庭账号', {type:ButtonType.Normal}).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).constraintSize({minHeight:48}).width('100%').borderRadius(12).onClick(()=>{this.openConnection();})
+      }else{
+        Text('成员的开通与邀请在「家庭与账号」，本页用于查看成员与切换账号。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
+        Button('进入家庭与账号', {type:ButtonType.Normal}).backgroundColor(CareTheme.softBlue).fontColor(PRIMARY).constraintSize({minHeight:48}).width('100%').borderRadius(12).onClick(()=>{router.pushUrl({url:'pages/AccountCenter',params:{server:this.serverDraft}});})
+      }
     }.width('100%')
   }
   @Builder
