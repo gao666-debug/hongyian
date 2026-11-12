@@ -40,6 +40,14 @@
 /* 应答播报排队数量；连播（如温湿度）靠延时分帧，避免占住串口 */
 #define VOICE_SAY_MAX 6
 
+/* 上电语音自检：烧录新词条后临时置 1（编译参数 -DSU03T_SELF_TEST=1），
+ * 上电后从 4 号到 22 号逐个播报一遍，每句间隔 2 秒，约 38 秒播完，
+ * 用来确认哪条没烧进去、播错或没声音。验证完请改回 0，避免每次开机都念。
+ * 自检走线程独立计时，不占用 VOICE_SAY_MAX 应答队列。 */
+#ifndef SU03T_SELF_TEST
+#define SU03T_SELF_TEST 0
+#endif
+
 typedef struct {
     uint8_t index;
     uint8_t is_value;   /* 0=固定句帧 1=数值帧 */
@@ -60,6 +68,12 @@ static int s_say_n;
 static int s_page = -1;
 static char s_note[24];
 static uint64_t s_note_up;
+
+#if SU03T_SELF_TEST
+/* 自检游标：-1 表示未开始或已播完 */
+static int s_selftest_idx = -1;
+static uint64_t s_selftest_due;
+#endif
 
 static void write_frame(const uint8_t *data, unsigned size)
 {
@@ -479,6 +493,18 @@ static void su_03t_thread(void *arg)
         if (rec_len > 0 && rec_len <= (int)sizeof(data)) su03t_receive_bytes(data, rec_len);
         else say_flush(LOS_TickCountGet());
 
+#if SU03T_SELF_TEST
+        if (s_selftest_idx >= 4) {
+            uint64_t now = LOS_TickCountGet();
+            if (s_selftest_due == 0 || now >= s_selftest_due) {
+                send_phrase((uint8_t)s_selftest_idx);
+                printf("[voice] self test index=%d\r\n", s_selftest_idx);
+                s_selftest_due = now + 2000;
+                s_selftest_idx = s_selftest_idx >= 22 ? -1 : s_selftest_idx + 1;
+            }
+        }
+#endif
+
         LOS_Msleep(100);
     }
 }
@@ -526,4 +552,11 @@ void su03t_init(void)
     {
         printf("Failed to create su-03t task ret:0x%x\n", ret);
     }
+
+#if SU03T_SELF_TEST
+    s_selftest_idx = SU03T_ACTION_VOICE_ENABLED ? 4 : -1;
+    s_selftest_due = 0;
+    printf("[voice] self test %s\r\n",
+           s_selftest_idx >= 0 ? "queued 4..22" : "skipped (VOICE_DEDICATED_IDX=0)");
+#endif
 }
