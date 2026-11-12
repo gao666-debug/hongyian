@@ -278,8 +278,9 @@ struct Index {
   @State fwTls: boolean = false;
   @State alarms: AlarmEvent[] = [];
   @State alarmFilter: number = 0;
-  @State activeExpanded: boolean = false;
-  @State historyExpanded: boolean = false;
+  // 报警列表分批展开：默认各 3 条，每次多展开 10 条，避免长列表一次铺满。
+  @State activeLimit: number = 3;
+  @State historyLimit: number = 3;
   @State hours: number[] = [];
   @State days: DayStats[] = [];
   @State notificationsEnabled:boolean=false;
@@ -1110,7 +1111,23 @@ struct Index {
   // Long histories are collapsed first; expanding is explicit so the page stays readable.
   private shownAlarms(active: boolean): AlarmEvent[] {
     const list=this.groupAlarms(active);
-    return (active?this.activeExpanded:this.historyExpanded)?list:list.slice(0,3);
+    return list.slice(0, active?this.activeLimit:this.historyLimit);
+  }
+  private alarmRemain(active: boolean): number {
+    return Math.max(0, this.groupAlarms(active).length-(active?this.activeLimit:this.historyLimit));
+  }
+  private alarmMoreLabel(active: boolean): string {
+    const remain=this.alarmRemain(active);
+    if(remain<=0){return '收起';}
+    return remain>10?('再看 10 条 · 还剩 '+remain+' 条'):('展开剩余 '+remain+' 条');
+  }
+  private alarmMoreTap(active: boolean): void {
+    const total=this.groupAlarms(active).length;
+    if(this.alarmRemain(active)<=0){
+      if(active){this.activeLimit=3;}else{this.historyLimit=3;}
+      return;
+    }
+    if(active){this.activeLimit=Math.min(total,this.activeLimit+10);}else{this.historyLimit=Math.min(total,this.historyLimit+10);}
   }
   private oldUnresolved(): AlarmEvent[] {
     return this.unhandledAlarms().filter((item:AlarmEvent)=>!this.eventActive(item));
@@ -1566,9 +1583,7 @@ struct Index {
         this.entryRow({icon:$r('app.media.door'),title:'房门',value:this.doorEntryValue(),action:'door'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.activity'),title:'活动记录',value:this.activityEntryValue(),action:'activity'})
-      }.padding({left:16,right:16}).width('100%').backgroundColor(Color.White).borderRadius(16)
-      Row(){Text('需要帮助？').fontSize(this.readableSize(14)).fontColor(SUB).layoutWeight(1);Button('主动呼救', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(Color.White).border({width:0.7,color:CareTheme.line}).borderRadius(12).constraintSize({minHeight:48,minWidth:104}).enabled(!this.careActionBusy).onClick(()=>{this.careAction(true);})}.width('100%').margin({top:20})
-      if(this.careActionMessage){Text(this.careActionMessage).fontSize(13).fontColor(SUB).width('100%').margin({top:8})}
+      }.padding({left:16,right:16}).width('100%').backgroundColor(Color.White).borderRadius(16).margin({bottom:4})
     }.width('100%')
   }
   @Builder
@@ -1707,9 +1722,9 @@ struct Index {
         }.padding(16).width('100%').backgroundColor(Color.White).borderRadius(16).border({width:{left:active?3:0},color:RED}).margin({bottom:12}).onClick(()=>{if(!active){this.showAlarm(item);}})
       },(item:AlarmEvent)=>alarmKey(item)+':'+item.phase+':'+this.eventLabel(item))
       if(this.groupAlarms(active).length>3){
-        Button((active?this.activeExpanded:this.historyExpanded)?'收起':'展开全部 '+this.groupAlarms(active).length+' 条', {type:ButtonType.Normal})
+        Button(this.alarmMoreLabel(active), {type:ButtonType.Normal})
           .fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).width('100%').borderRadius(12)
-          .onClick(()=>{if(active){this.activeExpanded=!this.activeExpanded;}else{this.historyExpanded=!this.historyExpanded;}})
+          .onClick(()=>{this.alarmMoreTap(active);})
       }
     }.width('100%')
   }
