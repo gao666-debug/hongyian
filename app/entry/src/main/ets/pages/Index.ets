@@ -30,6 +30,12 @@ const BG: string = CareTheme.background;
 const RED: string = CareTheme.alarm;
 const AMBER: string = CareTheme.warmInk;
 const DEVICE: string = '6acdec5b18855b39c5552ec3_TXSMART001';
+// 演示模式没有真实家庭，这里给一组固定成员，用于展示提醒选人流程。
+const DEMO_REMIND_TARGETS: HouseholdMember[] = [
+  { username: 'daughter', role: 'caregiver' },
+  { username: 'son', role: 'owner' },
+  { username: 'community_wang', role: 'community' }
+];
 
 interface DoorRecord { state:string; previous:string; observed_at:number; }
 interface DoorSummary { hint:string; level:string; door?:string; }
@@ -64,13 +70,20 @@ struct Index {
   @State remindMessage: string = '';
   @State remindOpen: boolean = false;
   @State remindTargets: string[] = [];
+  // 演示模式默认权限全开，打开此开关后按只读成员体验，便于展示「提醒家人」流程。
+  @State demoReadonly: boolean = false;
+  @State demoReadonlyMessage: string = '';
   @State unreadTotal: number = 0;
   private lastUnread: number = -1;
   private unreadPolling: boolean = false;
   private noticeOpen: boolean = false;
   private noteRequest: string = '';
   private noteRequestBody: string = '';
-  private allowed(action:string): boolean { return this.demo || roleAllows(this.familyRole,action); }
+  private allowed(action:string): boolean {
+    // 演示默认权限全开；打开只读体验后按 viewer 的真实权限集（view / alarms.read）收口。
+    if(this.demo){ return this.demoReadonly ? (action==='view'||action==='alarms.read') : true; }
+    return roleAllows(this.familyRole,action);
+  }
   private expiredSession(generation:number): void {
     if(generation!==this.generation||this.api.token||!this.loggedIn){return;}
     this.generation++;this.loggedIn=false;this.demo=false;this.simulated=false;this.online=false;this.pushOnline=false;
@@ -586,7 +599,9 @@ struct Index {
     return alarmIsActive(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
   }
   private eventLabel(item: AlarmEvent): string {
-    const label=alarmStateLabel(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
+    let label=alarmStateLabel(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
+    // 设备侧已结束、但家属已记录处理的事件，需要同时说清「报警已结束」和「有人处理过」。
+    if(label==='已结束' && item.handling && item.handling.resolution!=='follow_up'){label='已结束 · 已处理';}
     return item.claim?label+' · '+item.claim.username+' 正在处理':label;
   }
   // Only events that just happened may interrupt the user. Old unresolved events
@@ -1181,10 +1196,10 @@ struct Index {
   }
   // Accounts without handling rights can still ask someone who has them.
   private remindCandidates(): HouseholdMember[] {
+    if (this.demo) { return DEMO_REMIND_TARGETS; }
     return this.members.filter((item: HouseholdMember) => item.username !== this.accountName && roleAllows(item.role, 'alarms.handle'));
   }
   private openRemind(): void {
-    if (this.demo) { this.remindMessage = '演示环境不会真的发送提醒'; return; }
     if (!this.selected) { return; }
     const candidates = this.remindCandidates();
     if (!candidates.length) { this.remindMessage = '当前家庭没有其他可处理报警的成员'; return; }
@@ -1196,7 +1211,8 @@ struct Index {
     this.remindTargets = this.remindTargets.includes(name) ? this.remindTargets.filter((item: string) => item !== name) : this.remindTargets.concat([name]);
   }
   private async sendRemind(): Promise<void> {
-    if (this.remindBusy||!this.selected||this.demo) { return; }
+    if (this.remindBusy||!this.selected) { return; }
+    if (this.demo) { this.remindOpen=false; this.remindMessage='演示环境不会真的发送提醒，真实账号会通知已选成员'; return; }
     if (!this.remindTargets.length) { this.remindMessage = '请至少选择一位成员'; return; }
     const key=alarmKey(this.selected), generation=this.generation;
     const payload: RemindBody = { targets: this.remindTargets };
@@ -1963,6 +1979,20 @@ struct Index {
           Toggle({type:ToggleType.Switch,isOn:this.voiceOn}).selectedColor(PRIMARY).onChange((value:boolean)=>{this.setVoice(value);})
         }.width('100%').padding({top:16,bottom:16})
         if(this.voiceMessage){Text(this.voiceMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%').padding({bottom:12}).lineHeight(this.readableLine(19))}
+        if(this.demo){
+          Divider().color(CareTheme.line).strokeWidth(0.5)
+          Row({space:12}){
+            Column({space:4}){
+              Text('只读成员体验').fontSize(this.readableSize(16)).fontColor(INK)
+              Text(this.demoReadonly?'当前是只读视角：只能提醒家人，不能处置报警':'按有处置权限的守护者展示').fontSize(this.readableSize(13)).fontColor(SUB)
+              if(this.demoReadonlyMessage){Text(this.demoReadonlyMessage).fontSize(this.readableSize(12)).fontColor(AMBER).lineHeight(this.readableLine(18))}
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            Toggle({type:ToggleType.Switch,isOn:this.demoReadonly}).selectedColor(PRIMARY).onChange((value:boolean)=>{
+              this.demoReadonly=value;
+              this.demoReadonlyMessage=value?'去报警页打开任意一条记录，即可看到「提醒家人查看处理」':'已切回有处置权限的视角';
+            })
+          }.width('100%').padding({top:16,bottom:16})
+        }
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.pill'),title:'生活提醒',value:'夜灯与服药',action:'living'})
         if(this.elderModeMessage){Text(this.elderModeMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%').padding({bottom:12})}
@@ -2290,16 +2320,18 @@ struct Index {
         if(this.remindMessage){Text(this.remindMessage).fontSize(this.readableSize(12)).fontColor(this.remindMessage.indexOf('未发送')>=0?AMBER:PRIMARY).width('100%').lineHeight(this.readableLine(19))}
       }.width('100%').alignItems(HorizontalAlign.Start)}
       ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}${note.account_deleted?'（账号已删除）':''}：${note.note}`).fontSize(this.readableSize(13)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
-      Row({space:8}) { Button('已处理').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='handled'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='false_alarm'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='follow_up'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
-      Text('先选择处置结果，再点击“保存处理记录”。成功后关闭详情；只保存这条事件的处理说明，不解除设备报警。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
       if(this.allowed('alarms.handle')){
+        Row({space:8}) { Button('已处理').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='handled'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='false_alarm'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='follow_up'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
+        Text('先选择处置结果，再点击“保存处理记录”。成功后关闭详情；只保存这条事件的处理说明，不解除设备报警。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
         Row({space:8}){
           Button('已联系社区上门',{type:ButtonType.Normal}).fontSize(this.readableSize(12)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).layoutWeight(1).enabled(!this.noteSaving).onClick(()=>{this.noteDraft='已联系社区网格员上门查看';this.resolution='follow_up';})
           Button('已核实，老人正常',{type:ButtonType.Normal}).fontSize(this.readableSize(12)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).layoutWeight(1).enabled(!this.noteSaving).onClick(()=>{this.noteDraft='已联系老人并核实一切正常，确认为误报';this.resolution='false_alarm';})
         }.width('100%')
+        TextArea({text:this.noteDraft,placeholder:'补充联系家属、现场查看等处理情况…'}).maxLength(2000).enabled(!this.noteSaving).height(90).fontSize(this.readableSize(13)).backgroundColor(BG).onChange((value:string)=>{this.noteDraft=value;})
+        Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 48).width('100%').backgroundColor(PRIMARY).enabled(!this.noteSaving&&this.selected!==null&&(!this.selected?.claim||this.selected?.claim?.username===this.accountName)).onClick(()=>{this.saveNote();})
+      }else{
+        Text('只读账号可以查看已有处理记录，新增或修改处理说明需要处置权限。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
       }
-      TextArea({text:this.noteDraft,placeholder:'补充联系家属、现场查看等处理情况…'}).maxLength(2000).enabled(!this.noteSaving&&this.allowed('alarms.handle')).height(90).fontSize(this.readableSize(13)).backgroundColor(BG).onChange((value:string)=>{this.noteDraft=value;})
-      Button(this.noteSaving?'正在保存…':'保存处理记录').height(this.elderMode ? 60 : 48).width('100%').backgroundColor(PRIMARY).enabled(!this.noteSaving&&this.selected!==null&&this.allowed('alarms.handle')&&(!this.selected?.claim||this.selected?.claim?.username===this.accountName)).onClick(()=>{this.saveNote();})
       if(this.noteMessage){Text(this.noteMessage).fontSize(this.readableSize(13)).fontColor(this.noteMessage.indexOf('失败')>=0?RED:PRIMARY).width('100%')}
       if (this.demo) { Text('演示操作不会发送到真实设备').fontSize(this.readableSize(13)).fontColor(AMBER) }
     }.padding(22).width('100%')
