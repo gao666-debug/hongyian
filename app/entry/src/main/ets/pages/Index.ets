@@ -44,6 +44,7 @@ interface SummaryView { label: string; value: string; }
 interface InfoView { label: string; value: string; color: string; }
 interface UnreadTotal { unread: number; }
 interface AlarmRemind { event_key?: string; username?: string; created?: number; }
+interface RemindBody { targets: string[]; }
 
 @Entry
 @Component
@@ -61,6 +62,8 @@ struct Index {
   @State claimBusy: boolean = false;
   @State remindBusy: boolean = false;
   @State remindMessage: string = '';
+  @State remindOpen: boolean = false;
+  @State remindTargets: string[] = [];
   @State unreadTotal: number = 0;
   private lastUnread: number = -1;
   private unreadPolling: boolean = false;
@@ -262,6 +265,8 @@ struct Index {
   @State fwTls: boolean = false;
   @State alarms: AlarmEvent[] = [];
   @State alarmFilter: number = 0;
+  @State activeExpanded: boolean = false;
+  @State historyExpanded: boolean = false;
   @State hours: number[] = [];
   @State days: DayStats[] = [];
   @State notificationsEnabled:boolean=false;
@@ -557,9 +562,9 @@ struct Index {
     }
     if (this.alarmReminders && this.visible) {
       this.alertQueue = this.alertQueue.concat(fresh);
-      if(!this.demo){fresh.forEach((item:AlarmEvent)=>{AlarmNotifications.publish(this.api.device,item);});}
+      if(!this.demo){fresh.filter((item:AlarmEvent)=>this.alarmRecent(item)).forEach((item:AlarmEvent)=>{AlarmNotifications.publish(this.api.device,item);});}
     }
-    if (fresh.length && this.visible) { this.announceAlarms(fresh); }
+    if (fresh.length && this.visible) { this.announceAlarms(fresh.filter((item:AlarmEvent)=>this.alarmRecent(item))); }
     this.pruneAlerts();
   }
   // 语音播报只念最新一条：老人听到一句明确的提示就够了，连播反而听不清。
@@ -584,10 +589,18 @@ struct Index {
     const label=alarmStateLabel(item,this.alarms,this.alarmSnapshot(),this.acknowledgedAlarms);
     return item.claim?label+' · '+item.claim.username+' 正在处理':label;
   }
+  // Only events that just happened may interrupt the user. Old unresolved events
+  // stay in the list as history; they must not pop up again on every launch.
+  private alarmRecent(item: AlarmEvent): boolean {
+    if (this.demo) { return true; }
+    if (!item.epoch || item.epoch <= 0) { return false; }
+    return this.now - item.epoch * 1000 <= 30 * 60 * 1000;
+  }
   private pruneAlerts(): void {
     this.alertQueue=this.alertQueue.filter((item: AlarmEvent)=>{
       const current=this.alarms.find((record: AlarmEvent)=>alarmKey(record)===alarmKey(item));
-      return this.eventActive(current || item);
+      const target=current||item;
+      return this.eventActive(target) && this.alarmRecent(target);
     });
   }
   private rememberAcknowledgement(keys: string[]): void {
@@ -595,7 +608,7 @@ struct Index {
     this.pruneAlerts();
   }
   private closeAlarm(): void {
-    if(!this.noteSaving){this.selected=null;this.noteOperation++;}
+    if(!this.noteSaving){this.selected=null;this.remindOpen=false;this.remindTargets=[];this.noteOperation++;}
   }
 
   private async openAlert(): Promise<void> {
@@ -1076,6 +1089,17 @@ struct Index {
   private unhandledAlarms(): AlarmEvent[] {
     return this.alarms.filter((item:AlarmEvent)=>!item.handling || item.handling.resolution==='follow_up');
   }
+  private groupAlarms(active: boolean): AlarmEvent[] {
+    return this.alarms.filter((item:AlarmEvent)=>this.eventActive(item)===active);
+  }
+  // Long histories are collapsed first; expanding is explicit so the page stays readable.
+  private shownAlarms(active: boolean): AlarmEvent[] {
+    const list=this.groupAlarms(active);
+    return (active?this.activeExpanded:this.historyExpanded)?list:list.slice(0,3);
+  }
+  private oldUnresolved(): AlarmEvent[] {
+    return this.unhandledAlarms().filter((item:AlarmEvent)=>!this.eventActive(item));
+  }
   private async careAction(sos: boolean, oldOnly: boolean = false): Promise<void> {
     if(!this.allowed(sos?'control':'alarms.handle')){this.careActionMessage='此账号没有该操作权限';return;}
     if(this.careActionBusy || this.noteSaving || this.commandBusy){return;}
@@ -1156,14 +1180,33 @@ struct Index {
     }
   }
   // Accounts without handling rights can still ask someone who has them.
-  private async remindAlarm(): Promise<void> {
-    if(this.remindBusy||!this.selected||this.demo){if(this.demo){this.remindMessage='演示环境不会真的发送提醒';}return;}
+  private remindCandidates(): HouseholdMember[] {
+    return this.members.filter((item: HouseholdMember) => item.username !== this.accountName && roleAllows(item.role, 'alarms.handle'));
+  }
+  private openRemind(): void {
+    if (this.demo) { this.remindMessage = '演示环境不会真的发送提醒'; return; }
+    if (!this.selected) { return; }
+    const candidates = this.remindCandidates();
+    if (!candidates.length) { this.remindMessage = '当前家庭没有其他可处理报警的成员'; return; }
+    this.remindTargets = candidates.map((item: HouseholdMember) => item.username);
+    this.remindMessage = '';
+    this.remindOpen = true;
+  }
+  private toggleRemind(name: string): void {
+    this.remindTargets = this.remindTargets.includes(name) ? this.remindTargets.filter((item: string) => item !== name) : this.remindTargets.concat([name]);
+  }
+  private async sendRemind(): Promise<void> {
+    if (this.remindBusy||!this.selected||this.demo) { return; }
+    if (!this.remindTargets.length) { this.remindMessage = '请至少选择一位成员'; return; }
     const key=alarmKey(this.selected), generation=this.generation;
+    const payload: RemindBody = { targets: this.remindTargets };
+    const count=this.remindTargets.length;
     this.remindBusy=true;this.remindMessage='';
     try{
-      await this.api.request(this.api.path('alarms/'+key+'/remind'),http.RequestMethod.POST,'{}');
+      await this.api.request(this.api.path('alarms/'+key+'/remind'),http.RequestMethod.POST,JSON.stringify(payload));
       if(generation!==this.generation){return;}
-      this.remindMessage='已提醒有处置权限的成员，对方打开 App 即可看到';
+      this.remindOpen=false;
+      this.remindMessage='已提醒 '+count+' 位成员，对方打开 App 即可看到';
     }catch(error){
       if(generation===this.generation){this.remindMessage='提醒未发送：'+(error as Error).message;}
     }finally{this.remindBusy=false;}
@@ -1634,7 +1677,7 @@ struct Index {
   @Builder
   alarmGroup(active:boolean) {
     Column() {
-      ForEach(this.alarms.filter((item:AlarmEvent)=>this.eventActive(item)===active),(item:AlarmEvent)=>{
+      ForEach(this.shownAlarms(active),(item:AlarmEvent)=>{
         Column({space:10}) {
           Row({space:10}) {this.icon(active?$r('app.media.warning'):$r('app.media.bell'),22);Text(alarmTitle(item.code)).fontSize(this.readableSize(active?18:16)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1);if(!active){Text(this.eventLabel(item)).fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({maxWidth:'42%'})}}
           Text(alarmTime(item)).fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
@@ -1647,6 +1690,11 @@ struct Index {
           }else {Text('查看详情与处置记录 ›').fontSize(this.readableSize(13)).fontColor(PRIMARY).width('100%')}
         }.padding(16).width('100%').backgroundColor(Color.White).borderRadius(16).border({width:{left:active?3:0},color:RED}).margin({bottom:12}).onClick(()=>{if(!active){this.showAlarm(item);}})
       },(item:AlarmEvent)=>alarmKey(item)+':'+item.phase+':'+this.eventLabel(item))
+      if(this.groupAlarms(active).length>3){
+        Button((active?this.activeExpanded:this.historyExpanded)?'收起':'展开全部 '+this.groupAlarms(active).length+' 条', {type:ButtonType.Normal})
+          .fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).width('100%').borderRadius(12)
+          .onClick(()=>{if(active){this.activeExpanded=!this.activeExpanded;}else{this.historyExpanded=!this.historyExpanded;}})
+      }
     }.width('100%')
   }
   @Builder
@@ -1661,6 +1709,12 @@ struct Index {
         Button({type:ButtonType.Normal}){this.icon($r('app.media.refresh'),20)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.refresh(true);})
       }.width('100%').margin({bottom:16})
       if(this.pendingCount()>0){Text(this.pendingCount()+' 条异常需要核实').fontSize(this.readableSize(14)).fontColor(RED).padding(12).backgroundColor(CareTheme.alarmSurface).borderRadius(10).width('100%').margin({bottom:12})}
+      if(this.allowed('alarms.handle') && this.oldUnresolved().length>0){
+        Row({space:10}) {
+          Text('另有 '+this.oldUnresolved().length+' 条旧记录未标记处理').fontSize(this.readableSize(13)).fontColor(SUB).layoutWeight(1).lineHeight(this.readableLine(19))
+          Button(this.careActionBusy?'处理中…':'一键标记已处理',{type:ButtonType.Normal}).fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44,minWidth:120}).borderRadius(12).enabled(!this.careActionBusy&&!this.noteSaving).onClick(()=>{this.careAction(false,true);})
+        }.width('100%').padding({left:12,right:12,top:10,bottom:10}).backgroundColor(Color.White).borderRadius(12).margin({bottom:12})
+      }
       if(!this.alarms.length){this.empty('暂无报警记录','这里将保留收到的异常与处置记录。没有记录不等于设备已确认安全。')}
       else if(this.alarmFilter===1 && this.pendingCount()===0){this.empty('当前没有待核实报警','可切换全部记录，查看历史事件和处置说明。')}
       this.alarmGroup(true)
@@ -2137,6 +2191,35 @@ struct Index {
     }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(16).scrollBar(BarState.Off)
   }
   @Builder
+  remindSheet() {
+    Column({space:14}) {
+      Row() {
+        Text('提醒谁查看').fontSize(this.readableSize(20)).fontWeight(FontWeight.Bold).fontColor(INK)
+        Blank()
+        Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{if(!this.remindBusy){this.remindOpen=false;}})
+      }.width('100%')
+      Text('只会通知有处理权限的成员；提醒不会改变这条报警的状态，也不代表已经有人处理。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%')
+      Row({space:10}) {
+        Text('已选 '+this.remindTargets.length+'/'+this.remindCandidates().length+' 人').fontSize(this.readableSize(13)).fontColor(SUB).layoutWeight(1)
+        Text('全选').fontSize(this.readableSize(13)).fontColor(PRIMARY).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=this.remindCandidates().map((item: HouseholdMember)=>item.username);})
+        Text('清空').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=[];})
+      }.width('100%')
+      Column() {
+        ForEach(this.remindCandidates(),(item: HouseholdMember)=>{
+          Row({space:8}) {
+            Checkbox({name:item.username}).select(this.remindTargets.includes(item.username)).selectedColor(PRIMARY).onChange((value: boolean)=>{this.toggleRemind(item.username);})
+            Column({space:3}) {
+              Text(item.username).fontSize(this.readableSize(15)).fontColor(INK).width('100%')
+              Text(roleLabel(item.role)).fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+          }.width('100%').padding({top:6,bottom:6})
+        },(item: HouseholdMember)=>item.username)
+      }.width('100%')
+      if(this.remindMessage){Text(this.remindMessage).fontSize(this.readableSize(12)).fontColor(this.remindMessage.indexOf('未发送')>=0?AMBER:PRIMARY).width('100%').lineHeight(this.readableLine(19))}
+      Button(this.remindBusy?'正在发送…':'发送提醒',{type:ButtonType.Normal}).width('100%').constraintSize({minHeight:48}).backgroundColor(PRIMARY).fontColor(Color.White).borderRadius(12).fontSize(this.readableSize(15)).enabled(!this.remindBusy&&this.remindTargets.length>0).onClick(()=>{this.sendRemind();})
+    }.padding(22).width('90%').backgroundColor(Color.White).borderRadius(16)
+  }
+  @Builder
   incomingSheet() {
     Column({space:18}) {
       Column({space:12}) {
@@ -2148,8 +2231,11 @@ struct Index {
         if(this.alertQueue.length>1){Text('还有 '+(this.alertQueue.length-1)+' 条提醒待查看').fontSize(this.readableSize(13)).fontColor(AMBER)}
       }.width('100%').onClick(()=>{this.openAlert();})
       Button('查看并处理').width('100%').height(this.elderMode ? 60 : 48).backgroundColor(RED).borderRadius(14).fontSize(this.readableSize(15)).onClick(()=>{this.openAlert();})
-      Text('稍后查看').fontSize(this.readableSize(13)).fontColor(SUB).padding(8).onClick(()=>{this.alertQueue=this.alertQueue.slice(1);})
-      Text(this.demo?'此提醒仅为本地演示，不操作真实设备':'查看提醒不会自动确认报警或消音').fontSize(this.readableSize(13)).fontColor(SUB).textAlign(TextAlign.Center)
+      Row({space:10}) {
+        Button('稍后查看',{type:ButtonType.Normal}).layoutWeight(1).height(this.elderMode ? 54 : 44).backgroundColor('#E7EDF0').fontColor(INK).borderRadius(12).fontSize(this.readableSize(14)).onClick(()=>{this.alertQueue=this.alertQueue.slice(1);})
+        Button(this.alertQueue.length>1?'忽略全部 '+this.alertQueue.length+' 条':'忽略',{type:ButtonType.Normal}).layoutWeight(1).height(this.elderMode ? 54 : 44).backgroundColor(Color.White).border({width:0.7,color:CareTheme.line}).fontColor(SUB).borderRadius(12).fontSize(this.readableSize(14)).onClick(()=>{this.alertQueue=[];})
+      }.width('100%')
+      Text(this.demo?'此提醒仅为本地演示，不操作真实设备':'忽略只关闭本次提醒，不改变报警状态，也不删除记录').fontSize(this.readableSize(13)).fontColor(SUB).textAlign(TextAlign.Center)
     }.padding(26).width('90%').backgroundColor(Color.White).borderRadius(16)
   }
   private navIcon(index:number):Resource {
@@ -2199,8 +2285,8 @@ struct Index {
         }.width('100%')
       }else{Column({space:8}){
         Text('当前账号可查看记录，没有处置权限').fontSize(this.readableSize(13)).fontColor(AMBER).width('100%')
-        Button(this.remindBusy?'正在提醒…':'提醒家人查看处理',{type:ButtonType.Normal}).enabled(!this.remindBusy).constraintSize({minHeight:44}).width('100%').borderRadius(10).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.remindAlarm();})
-        Text('提醒只会通知有处置权限的成员，不会改变这条报警的状态').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
+        Button(this.remindBusy?'正在提醒…':'提醒家人查看处理',{type:ButtonType.Normal}).enabled(!this.remindBusy).constraintSize({minHeight:44}).width('100%').borderRadius(10).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.openRemind();})
+        Text('可指定提醒谁；只通知有处理权限的成员，不改变这条报警的状态').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
         if(this.remindMessage){Text(this.remindMessage).fontSize(this.readableSize(12)).fontColor(this.remindMessage.indexOf('未发送')>=0?AMBER:PRIMARY).width('100%').lineHeight(this.readableLine(19))}
       }.width('100%').alignItems(HorizontalAlign.Start)}
       ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}${note.account_deleted?'（账号已删除）':''}：${note.note}`).fontSize(this.readableSize(13)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
@@ -2247,6 +2333,7 @@ struct Index {
     }.width('100%')
   }
   onBackPress():boolean {
+    if(this.remindOpen&&!this.remindBusy){this.remindOpen=false;return true;}
     if(this.livingOpen&&!this.livingBusy){this.livingOpen=false;return true;}
     if(this.selected&&!this.noteSaving){this.closeAlarm();return true;}
     if(this.profileOpen&&!this.profileSaving){this.profileOpen=false;return true;}
@@ -2267,6 +2354,10 @@ struct Index {
       if (this.settingsOpen || this.profileOpen || this.selected!==null) {
         Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.loginBusy&&!this.profileSaving&&!this.livingBusy&&!this.noteSaving){this.noteOperation++;this.livingOpen=false;this.settingsOpen=false;this.profileOpen=false;this.selected=null;this.passwordDraft='';}})
         if(this.settingsOpen){this.settingsSheet()}else if(this.profileOpen){this.profileSheet()}else{this.alarmSheet()}
+      }
+      if(this.remindOpen){
+        Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.remindBusy){this.remindOpen=false;}})
+        this.remindSheet()
       }
       if(this.livingOpen){this.livingSheet()}
       if(this.switchOpen){

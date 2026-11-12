@@ -146,12 +146,17 @@ class Hub:
                 queue.put_nowait(event)
 
 
+class RemindRequest(StrictModel):
+    # Empty means "everyone who can actually handle the alarm".
+    targets: list[str] = Field(default_factory=list, max_length=20)
+
+
 def create_app(settings=None, cloud=None):
     settings = settings or Settings.load()
     settings.validate()
     store = Store(settings.db)
     store.bootstrap_user(settings.username,settings.password)
-    from .households import Households
+    from .households import Households, ROLE_PERMISSIONS
     homes = Households(store, settings)
     provider = cloud if cloud is not None else HuaweiCloud(settings) if settings.mode=='live' else None
     hub = Hub()
@@ -539,6 +544,10 @@ def create_app(settings=None, cloud=None):
                     await ws.close(code=4403); return
                 # Incident-only roles never receive health, camera or command payloads.
                 if 'view' not in homes.permissions(current['username']) and event['type'] not in ('alarm','alarm_note','alarm_claim','alarm_remind','ping','resync_required','message'): continue
+                if event['type']=='alarm_remind':
+                    # A reminder may be aimed at specific members; only they are woken up.
+                    aimed=(event.get('data') or {}).get('targets') or []
+                    if aimed and current['username'] not in aimed: continue
                 if event.get('type') == 'message':
                     try: chats.require_member(event.get('conversation_id'), current['username'])
                     except HTTPException: continue
@@ -878,16 +887,24 @@ def create_app(settings=None, cloud=None):
     # someone who can. This only raises attention; it never changes alarm state.
     remind_at = {}
     @app.post('/api/v1/devices/{device}/alarms/{event_key}/remind',status_code=202)
-    async def remind_alarm(device,event_key,user=Depends(session)):
+    async def remind_alarm(device,event_key,body:RemindRequest=None,user=Depends(session)):
         check_device(device,user,permission='alarms.read')
         with store.connection() as db:
             if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(settings.mode,device,'alarm',event_key)).fetchone(): raise HTTPException(404,'Alarm not found')
+            rows = db.execute('SELECT m.username AS username, m.role AS role FROM home_members m JOIN home_devices d ON d.home=m.home WHERE d.device=?',(device,)).fetchall()
+        # Only members who may actually handle the alarm are remindable.
+        handlers = [r['username'] for r in rows if 'alarms.handle' in ROLE_PERMISSIONS.get(r['role'],set())]
+        wanted = [name for name in (body.targets if body else []) if name in handlers and name != user['username']]
+        rejected = [name for name in (body.targets if body else []) if name not in handlers]
+        if rejected: raise HTTPException(400,'所选成员没有处理权限')
+        targets = wanted or [name for name in handlers if name != user['username']]
+        if not targets: raise HTTPException(409,'当前家庭没有其他可处理报警的成员')
         key=(device,event_key,user['username'])
         if time.time()-remind_at.get(key,0)<60: raise HTTPException(429,'请稍后再提醒，同一事件每分钟最多一次')
         remind_at[key]=time.time()
         created=time.time()
-        await publish(device,'alarm_remind',{'event_key':event_key,'username':user['username'],'created':created})
-        return envelope({'event_key':event_key,'username':user['username'],'created':created,'interval':60})
+        await publish(device,'alarm_remind',{'event_key':event_key,'username':user['username'],'created':created,'targets':targets})
+        return envelope({'event_key':event_key,'username':user['username'],'created':created,'interval':60,'targets':targets})
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
     def notes(device,event_key,user=Depends(session)):
