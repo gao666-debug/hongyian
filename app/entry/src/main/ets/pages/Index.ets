@@ -10,7 +10,7 @@ import { CareTheme } from '../theme/CareTheme';
 import { roleAllows, roleLabel, roleNote, collaborationError } from '../models/Permissions';
 import { AlarmNotifications, NotificationRoute } from '../services/AlarmNotifications';
 import { Backend } from '../services/Backend';
-import { watchVital, heartText, DistributedNode, DistributedFamily, HouseholdMember, readingFresh, sensorText, motionText, roomDoorText } from '../models/Distributed';
+import { watchVital, heartText, DistributedNode, DistributedFamily, HouseholdMember, readingFresh, sensorText, motionText, roomDoorText, EnvironmentProperties } from '../models/Distributed';
 import { DeviceSession } from '../services/DeviceSession';
 import { Accounts, SavedAccount } from '../services/Accounts';
 import { Voice } from '../services/Voice';
@@ -34,6 +34,7 @@ const DEVICE: string = '6acdec5b18855b39c5552ec3_TXSMART001';
 interface DoorRecord { state:string; previous:string; observed_at:number; }
 interface DoorSummary { hint:string; level:string; door?:string; }
 interface DoorRecords { summary:DoorSummary; items:DoorRecord[]; }
+function pad2(value:number):string { return value < 10 ? '0' + value : '' + value; }
 interface EntryView { icon: Resource; title: string; value: string; action: string; }
 interface ReadingView { label: string; value: string; unit: string; icon: Resource; }
 interface MetricView { icon: Resource; label: string; value: string; caption: string; tint: string; }
@@ -41,6 +42,8 @@ interface PillView { text: string; color: string; background: string; }
 interface SectionView { title: string; subtitle: string; }
 interface SummaryView { label: string; value: string; }
 interface InfoView { label: string; value: string; color: string; }
+interface UnreadTotal { unread: number; }
+interface AlarmRemind { event_key?: string; username?: string; created?: number; }
 
 @Entry
 @Component
@@ -56,6 +59,12 @@ struct Index {
   @State memberCreated: string = '';
   private readonly memberRoles: string[] = ['viewer','caregiver','community','property'];
   @State claimBusy: boolean = false;
+  @State remindBusy: boolean = false;
+  @State remindMessage: string = '';
+  @State unreadTotal: number = 0;
+  private lastUnread: number = -1;
+  private unreadPolling: boolean = false;
+  private noticeOpen: boolean = false;
   private noteRequest: string = '';
   private noteRequestBody: string = '';
   private allowed(action:string): boolean { return this.demo || roleAllows(this.familyRole,action); }
@@ -76,6 +85,7 @@ struct Index {
   @State switchUser: string = '';
   @State switchPassword: string = '';
   @State switchServer: string = '';
+  @State switchOpen: boolean = false;
   private async addMember(): Promise<void> {
     if (this.memberBusy || !this.allowed('members.manage')) { return; }
     this.memberName=this.memberName.trim();
@@ -139,7 +149,20 @@ struct Index {
   private localExtras(): SavedAccount[] {
     const base=this.api.base;
     return this.accounts.filter((item:SavedAccount):boolean=>
-      item.server===base&&!this.members.some((member:HouseholdMember):boolean=>member.username===item.username));
+      item.server===base&&item.username!==this.accountName&&!this.members.some((member:HouseholdMember):boolean=>member.username===item.username));
+  }
+  // The active account is not always present in the member list right after login.
+  private knownRole(username:string): string {
+    if(username===this.accountName&&this.familyRole){return this.familyRole;}
+    const member=this.members.find((item:HouseholdMember):boolean=>item.username===username);
+    if(member){return member.role;}
+    const saved=this.accounts.find((item:SavedAccount):boolean=>item.username===username&&item.server===this.api.base);
+    return saved?saved.role:'';
+  }
+  private accountLine(): string {
+    if (!this.loggedIn) { return '体验用户 · 演示模式'; }
+    const role = this.familyRole ? ' · ' + this.memberRoleLabel(this.familyRole) : '';
+    return this.accountName + role;
   }
   private accountStatusText(): string {
     const parts:string[]=[];
@@ -345,7 +368,7 @@ struct Index {
       }
       if (this.demo) {
         if (this.ticks % 5 === 0) { this.temp = 26.4 + Math.sin(this.ticks / 12) * 0.4; this.humi = 53 + Math.sin(this.ticks / 15) * 2; this.received = this.now; this.deviceTime = this.now; }
-      } else if (this.loggedIn && this.ticks % 2 === 0) { this.refresh(this.ticks % 16 === 0); if (this.ticks % 4 === 0 && this.detail !== 'members') { this.refreshFamily(); } }
+      } else if (this.loggedIn && this.ticks % 2 === 0) { this.refresh(this.ticks % 16 === 0); if (this.ticks % 4 === 0 && this.detail !== 'members') { this.refreshFamily(); } if (this.ticks % 10 === 0) { this.pollUnread(); } }
     }, 1000);
   }
   private stopTimer(): void { if (this.timer !== -1) { clearInterval(this.timer); this.timer = -1; } }
@@ -508,6 +531,11 @@ struct Index {
       if (!this.visible || this.demo) { return; }
       if (message.type === 'alarm' && message.data) { this.receiveAlarms([message.data as AlarmEvent]); }
       if (message.type === 'health' && message.data) { this.applyHealth(message.data as Health); }
+      if (message.type === 'alarm_remind' && message.data) {
+        const remind = message.data as AlarmRemind;
+        if (remind.username !== this.accountName && this.allowed('alarms.handle')) { this.showRemindNotice(remind.username||''); }
+        this.refresh(true);
+      }
       if (message.type === 'alarm_note' && this.selected) { this.refreshSelectedNotes(); }
       if (message.type === 'alarm_note' || message.type === 'alarm_claim' || message.type === 'alarm' || message.type === 'stats' || message.type === 'resync_required' || message.type === 'command_ack') { this.refresh(true); }
     }, (online: boolean) => { this.pushOnline = online; });
@@ -839,9 +867,11 @@ struct Index {
     if (!this.demo && this.loggedIn && entry.username === this.accountName && entry.server === this.api.base) {
       this.switchMessage = '当前已经在使用 ' + entry.username; return;
     }
-    this.switchMessage='切换账号需要验证该账号密码';
-    this.serverDraft=entry.server;this.userDraft=entry.username;this.passwordDraft='';this.settingsOpen=true;
-
+    this.switchMessage = '';
+    this.switchUser = entry.username;
+    this.switchServer = entry.server;
+    this.switchPassword = '';
+    this.switchOpen = true;
   }
   private async signInSwitch(): Promise<void> {
     if (this.switchBusy || this.loginBusy || !this.switchUser) { return; }
@@ -850,6 +880,7 @@ struct Index {
     try {
       await this.signIn(this.switchServer, this.switchUser, this.switchPassword);
       this.switchMessage = '已切换到 ' + this.switchUser;
+      this.switchOpen = false;
       this.switchUser = ''; this.switchPassword = ''; this.switchServer = '';
     } catch (error) { this.switchMessage = (error as Error).message; }
     finally { this.switchBusy = false; }
@@ -1124,6 +1155,52 @@ struct Index {
       if(operation===this.noteOperation){this.noteMessage='备注读取失败：'+(error as Error).message;}
     }
   }
+  // Accounts without handling rights can still ask someone who has them.
+  private async remindAlarm(): Promise<void> {
+    if(this.remindBusy||!this.selected||this.demo){if(this.demo){this.remindMessage='演示环境不会真的发送提醒';}return;}
+    const key=alarmKey(this.selected), generation=this.generation;
+    this.remindBusy=true;this.remindMessage='';
+    try{
+      await this.api.request(this.api.path('alarms/'+key+'/remind'),http.RequestMethod.POST,'{}');
+      if(generation!==this.generation){return;}
+      this.remindMessage='已提醒有处置权限的成员，对方打开 App 即可看到';
+    }catch(error){
+      if(generation===this.generation){this.remindMessage='提醒未发送：'+(error as Error).message;}
+    }finally{this.remindBusy=false;}
+  }
+  private async pollUnread(): Promise<void> {
+    if(this.unreadPolling||!this.loggedIn||this.demo){return;}
+    this.unreadPolling=true;
+    try{
+      const response=await this.api.request('/api/v1/messages/unread');
+      const data=response.data as UnreadTotal;
+      const total=Number((data&&data.unread)||0);
+      this.unreadTotal=total;
+      if(this.lastUnread>=0&&total>this.lastUnread&&this.tab!==4){this.showMessageNotice(total);}
+      this.lastUnread=total;
+    }catch(error){/* Keep the previous count while the network is down. */}
+    finally{this.unreadPolling=false;}
+  }
+  private async showMessageNotice(total:number): Promise<void> {
+    if(this.noticeOpen){return;}
+    this.noticeOpen=true;
+    try{
+      const answer=await promptAction.showDialog({title:'有新的家人消息',message:'未读消息 '+total+' 条，是否现在查看？',
+        buttons:[{text:'稍后',color:CareTheme.secondary},{text:'查看',color:CareTheme.primary}]});
+      if(answer.index===1){this.lastUnread=this.unreadTotal;router.pushUrl({url:'pages/Messages'});}
+    }catch(error){/* A dismissed dialog must never break polling. */}
+    finally{this.noticeOpen=false;}
+  }
+  private async showRemindNotice(by:string): Promise<void> {
+    if(this.noticeOpen){return;}
+    this.noticeOpen=true;
+    try{
+      const answer=await promptAction.showDialog({title:'有人请你查看报警',message:(by||'一位成员')+' 提醒你查看并处理这条报警记录',
+        buttons:[{text:'稍后',color:CareTheme.secondary},{text:'查看',color:CareTheme.primary}]});
+      if(answer.index===1){this.navigate(1);}
+    }catch(error){}
+    finally{this.noticeOpen=false;}
+  }
   private async claimAlarm(release:boolean=false): Promise<void> {
     if(!this.selected||this.claimBusy||this.noteSaving||!this.allowed('alarms.handle')){return;}
     const key=alarmKey(this.selected), generation=this.generation;
@@ -1198,7 +1275,110 @@ struct Index {
     if(!this.demo && (!this.online || this.stale()) || this.inactive<0 || !this.deviceTime){return '最后活动时间待确认';}
     return '最后活动约 '+new Date(this.deviceTime-this.inactive*1000).toLocaleString('zh-CN',{hour12:false});
   }
+  private roomNode(): DistributedNode | null {
+    const found = this.familyNodes.find((node: DistributedNode) => node.kind === 'environment' || node.kind === 'nearlink');
+    return found ? found : null;
+  }
+  private roomProps(): EnvironmentProperties | null {
+    const node = this.roomNode();
+    return node && node.properties ? node.properties : null;
+  }
+  private roomStamp(): string {
+    const node = this.roomNode();
+    return node && node.updated_at ? node.updated_at : '';
+  }
+  private roomAge(): string {
+    const node = this.roomNode();
+    if (this.demo) { return '演示数据'; }
+    if (!node) { return '尚未绑定房间节点'; }
+    return '房间节点 '+this.roomAgeShort()+'上报';
+  }
+  private roomAgeShort(): string {
+    if (this.demo) { return '演示数据'; }
+    const node = this.roomNode();
+    if (!node) { return '未绑定节点'; }
+    const at = Date.parse(node.updated_at || '');
+    if (!Number.isFinite(at)) { return '时间待确认'; }
+    const seconds = Math.max(0, Math.floor((this.now - at) / 1000));
+    if (seconds < 60) { return seconds+' 秒前'; }
+    if (seconds < 3600) { return Math.floor(seconds / 60)+' 分钟前'; }
+    if (seconds < 86400) { return Math.floor(seconds / 3600)+' 小时前'; }
+    return Math.floor(seconds / 86400)+' 天前';
+  }
+  private roomStampCaption(): string {
+    if (this.demo) { return '演示读数'; }
+    const node = this.roomNode();
+    if (!node) { return '未绑定节点'; }
+    return '上次上报 '+this.roomAgeShort();
+  }
+  private roomOnline(): string {
+    if (this.demo) { return '演示'; }
+    const node = this.roomNode();
+    if (!node) { return '待确认'; }
+    return node.online === true || readingFresh(node.updated_at, this.now) ? '近期在线' : '离线或待更新';
+  }
+  private doorStateTitle(): string {
+    const label = this.roomDoor();
+    return label.indexOf('演示') === 0 ? '房门关闭' : label;
+  }
+  private doorEntryValue(): string {
+    if (this.demo) { return '演示 · 已关闭'; }
+    if (!this.online || this.stale()) { return '数据待更新'; }
+    if (this.doorEnabled === 0) { return '未开启'; }
+    if (this.doorValid === 0) { return '读数无效'; }
+    if (this.doorValue === 1) { return '已打开'; }
+    if (this.doorValue === 0) { return '已关闭'; }
+    return '待上报';
+  }
+  private activityEntryValue(): string {
+    if (this.stale()) { return '数据待更新'; }
+    if (this.inactive < 0) { return this.activityTotal > 0 ? '今日 '+this.activityTotal+' 次' : '待上报'; }
+    return '距上次 '+this.inactive+' 秒';
+  }
+  private openDetail(action: string): void {
+    if (this.loggedIn && !this.demo) { this.refresh(true); }
+    this.detail = action;
+    this.pageScroller.scrollTo({ xOffset: 0, yOffset: 0 });
+  }
+  private doorItems(): DoorRecord[] { return this.doorRecords ? this.doorRecords.items.slice(0,10) : []; }
+  private doorRecordTime(epoch:number):string {
+    if (!Number.isFinite(epoch) || epoch <= 0) { return '时间待确认'; }
+    const date = new Date(epoch * 1000);
+    return (date.getMonth()+1)+'/'+date.getDate()+' '+pad2(date.getHours())+':'+pad2(date.getMinutes());
+  }
+  private doorHint(): string {
+    if (this.doorRecords) { return this.doorRecords.summary.hint; }
+    if (this.demo) { return '演示模式不读取真实门窗记录；连接设备后这里显示开合历史与异常提示。'; }
+    return this.doorRecordMessage || '正在同步门窗记录，初始状态不计为开关事件。';
+  }
+  private doorHintTone(): string { return this.doorRecords && this.doorRecords.summary.level==='attention' ? AMBER : SUB; }
+  private doorRecordCaption(): string {
+    if (this.demo) { return '演示模式'; }
+    if (!this.doorRecords) { return '同步中'; }
+    return this.doorRecords.items.length ? '最近 '+this.doorRecords.items.length+' 条' : '暂无开关变化';
+  }
+  private roomLight(): string { const p = this.roomProps(); return p ? sensorText(p.light,'') : '--'; }
+  private roomSmoke(): string { const p = this.roomProps(); return p ? sensorText(p.smoke,'') : '--'; }
+  private roomMotion(): string {
+    const p = this.roomProps();
+    if (!p) { return '待上报'; }
+    return p.body === 1 ? '有活动' : p.body === 0 ? '无活动' : '待上报';
+  }
+  private roomDoorShort(): string {
+    const p = this.roomProps();
+    if (!p) { return '待上报'; }
+    return p.door === 'OPEN' || p.door === 1 ? '已开' : p.door === 'CLOSED' || p.door === 0 ? '已关' : '待上报';
+  }
   private chartMax(): number { let max = 1; this.hours.forEach((value: number) => { max = Math.max(max, value); }); return max; }
+  private daysDesc(): DayStats[] { return this.days.slice().reverse(); }
+  private isSelectedDay(day: DayStats): boolean {
+    return this.days.length > 0 && this.chartDay < this.days.length && this.days[this.chartDay].date === day.date;
+  }
+  private selectDay(day: DayStats): void {
+    const index = this.days.findIndex((item: DayStats) => item.date === day.date);
+    if (index < 0) { return; }
+    this.chartDay = index; this.hours = day.activity_by_hour; this.activityTotal = day.activity_total; this.alarmTotal = day.alarm_total;
+  }
   private pendingCount(): number { return this.alarms.filter((item: AlarmEvent) => this.eventActive(item)).length; }
   private statusTitle(): string { return this.status > 0 ? alarmTitle(this.status) : this.stale() ? '数据等待更新' : !this.online ? '设备状态待确认' : '当前未见报警'; }
 
@@ -1258,7 +1438,7 @@ struct Index {
       else if($$.action==='devicecontact'){if(this.loggedIn&&!this.demo){router.pushUrl({url:'pages/DeviceContact'});}else{this.openConnection();}}
       else if($$.action==='connection'){this.openConnection();}
       else if($$.action==='profile'){this.editProfile();}
-      else {this.detail=$$.action;this.pageScroller.scrollTo({xOffset:0,yOffset:0});if($$.action==='members'){this.refreshFamily();}}
+      else {this.openDetail($$.action);if($$.action==='members'){this.refreshFamily();}}
     })
   }
   @Builder
@@ -1324,9 +1504,9 @@ struct Index {
       }.width('100%').backgroundColor(Color.White).borderRadius(16)
       Text(this.stale()?'记录已过期，不能用于确认当前安全状态':this.demo?'演示读数，不代表真实设备状态':this.age()).fontSize(this.readableSize(13)).fontColor(this.stale()?AMBER:SUB).width('100%').margin({top:8,bottom:16})
       Column() {
-        this.entryRow({icon:$r('app.media.door'),title:'房门',value:this.doorRecords?this.doorRecords.summary.door==='OPEN'?'开启':this.doorRecords.summary.door==='CLOSED'?'关闭':'查看记录':this.demo?'演示 · 关闭':'查看房间节点',action:'door'})
+        this.entryRow({icon:$r('app.media.door'),title:'房门',value:this.doorEntryValue(),action:'door'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
-        this.entryRow({icon:$r('app.media.activity'),title:'活动记录',value:this.stale()?'数据待更新':this.inactive<0?'待上报':'距上次 '+this.inactive+' 秒',action:'activity'})
+        this.entryRow({icon:$r('app.media.activity'),title:'活动记录',value:this.activityEntryValue(),action:'activity'})
       }.padding({left:16,right:16}).width('100%').backgroundColor(Color.White).borderRadius(16)
       Row(){Text('需要帮助？').fontSize(this.readableSize(14)).fontColor(SUB).layoutWeight(1);Button('主动呼救', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(RED).backgroundColor(Color.White).border({width:0.7,color:CareTheme.line}).borderRadius(12).constraintSize({minHeight:48,minWidth:104}).enabled(!this.careActionBusy).onClick(()=>{this.careAction(true);})}.width('100%').margin({top:20})
       if(this.careActionMessage){Text(this.careActionMessage).fontSize(13).fontColor(SUB).width('100%').margin({top:8})}
@@ -1503,7 +1683,7 @@ struct Index {
       Column(){this.entryRow({icon:$r('app.media.chart'),title:'活动报告',value:'昨日对比 · 周报 · 月报',action:'reports'})}.padding({left:16,right:16}).backgroundColor(Color.White).borderRadius(16).width('100%').margin({top:16})
       this.section({ title: '每日活动分布', subtitle: this.days.length ? this.days[this.chartDay].date : '暂无日期' })
       if (this.days.length > 1) {
-        Scroll() { Row({space:8}) { ForEach(this.days,(day:DayStats,index:number)=>{ Button(day.date.substring(5)).fontSize(this.readableSize(13)).backgroundColor(index===this.chartDay?INK:'#E6EDF0').fontColor(index===this.chartDay?'#FFFFFF':SUB).onClick(()=>{this.chartDay=index;this.hours=day.activity_by_hour;this.activityTotal=day.activity_total;this.alarmTotal=day.alarm_total;}) },(day:DayStats)=>`${day.date}:${day.activity_total}:${day.alarm_total}`) } }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).margin({bottom:12})
+        Scroll() { Row({space:8}) { ForEach(this.daysDesc(),(day:DayStats)=>{ Button(day.date.substring(5)).fontSize(this.readableSize(13)).backgroundColor(this.isSelectedDay(day)?INK:'#E6EDF0').fontColor(this.isSelectedDay(day)?'#FFFFFF':SUB).onClick(()=>{this.selectDay(day);}) },(day:DayStats)=>`${day.date}:${day.activity_total}:${day.alarm_total}`) } }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).margin({bottom:12})
       }
       this.chart(true)
       Column({space:9}) { Text('如何理解这张图').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('活动次数是人体感应从无活动变为有活动的次数，并非步数。设备关机或未覆盖的时段，不代表老人没有活动。').fontSize(this.readableSize(13)).lineHeight(this.readableLine(21)).fontColor(SUB); Text(this.demo?'当前为演示曲线，仅用于展示界面。':'仅展示设备实际保存的统计；未对时或未收到消息时，不生成虚假历史。').fontSize(this.readableSize(13)).lineHeight(this.readableLine(19)).fontColor(AMBER) }.padding(18).backgroundColor('#EDF2F3').borderRadius(16).margin({top:16})
@@ -1549,17 +1729,91 @@ struct Index {
   @Builder
   info($$: InfoView) { Row() { Text($$.label).fontSize(this.readableSize(13)).fontColor(SUB); Blank(); Text($$.value).fontSize(this.readableSize(13)).fontColor($$.color).textAlign(TextAlign.End).layoutWeight(1).margin({left:12}) }.width('100%').padding({top:13,bottom:13}).border({width:{bottom:0.5},color:'#EEF2F3'}) }
   @Builder
-  doorHistory() {
-    if(this.doorRecords){
-      Column({space:10}) {
-        Text('门窗与出入观察').fontSize(this.readableSize(16)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%')
-        Text(this.doorRecords.summary.hint).fontSize(this.readableSize(13)).fontColor(this.doorRecords.summary.level==='attention'?AMBER:SUB).width('100%')
-        ForEach(this.doorRecords.items.slice(0,8),(item:DoorRecord)=>{
-          Row(){Text(item.state==='OPEN'?'开启':'关闭').fontSize(13).fontColor(PRIMARY);Blank();Text(new Date(item.observed_at*1000).toLocaleString('zh-CN',{hour12:false})).fontSize(13).fontColor(SUB)}.width('100%')
+  doorStateCard() {
+    Column({space:14}) {
+      Row({space:14}) {
+        Stack(){ Rect().fill(CareTheme.softBlue).width(52).height(52).radius(16); this.icon($r('app.media.door'),29) }
+        Column({space:6}) {
+          Text(this.doorStateTitle()).fontSize(this.readableSize(21)).fontWeight(FontWeight.Bold).fontColor(INK).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).width('100%')
+          Text(this.roomAge()).fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        this.pill({text:this.roomOnline(),color:this.roomOnline()==='近期在线'||this.roomOnline()==='演示'?PRIMARY:AMBER,background:this.roomOnline()==='近期在线'||this.roomOnline()==='演示'?CareTheme.softBlue:'#FBF1E6'})
+      }.width('100%')
+      Divider().color(CareTheme.line).strokeWidth(0.5)
+      Text(this.doorHint()).fontSize(this.readableSize(13)).fontColor(this.doorHintTone()).lineHeight(this.readableLine(21)).width('100%')
+    }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%')
+  }
+  @Builder
+  roomCell(icon: Resource, label: string, value: string, unit: string) {
+    Column({space:7}) {
+      Row({space:7}) {this.icon(icon,19);Text(label).fontSize(this.readableSize(13)).fontColor(SUB)}
+      Row({space:4}) {
+        Text(value).fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(INK).maxLines(1).minFontSize(14).maxFontSize(this.readableSize(22)).layoutWeight(1)
+        Text(unit).fontSize(this.readableSize(12)).fontColor(SUB).margin({bottom:3})
+      }.width('100%').alignItems(VerticalAlign.Bottom)
+    }.padding({left:14,right:10,top:14,bottom:14}).layoutWeight(1).alignItems(HorizontalAlign.Start)
+  }
+  @Builder
+  roomReadings() {
+    Column() {
+      Row() {
+        this.roomCell($r('app.media.sun'),'光照采样',this.roomLight(),'mV')
+        Divider().vertical(true).height(62).color(CareTheme.line).strokeWidth(0.5)
+        this.roomCell($r('app.media.flame'),'烟雾采样',this.roomSmoke(),'mV')
+      }.width('100%')
+      Divider().color(CareTheme.line).strokeWidth(0.5).width('90%')
+      Row() {
+        this.roomCell($r('app.media.activity'),'人体活动',this.roomMotion(),'PIR')
+        Divider().vertical(true).height(62).color(CareTheme.line).strokeWidth(0.5)
+        this.roomCell($r('app.media.home'),'房门传感器',this.roomDoorShort(),'磁簧')
+      }.width('100%')
+    }.width('100%').backgroundColor(Color.White).borderRadius(16)
+  }
+  @Builder
+  doorRecordsCard() {
+    Column() {
+      if(this.doorItems().length){
+        ForEach(this.doorItems(),(item:DoorRecord)=>{
+          Row({space:10}) {
+            Text(item.state==='OPEN'?'开启':'关闭').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(item.state==='OPEN'?AMBER:PRIMARY).width(42)
+            Text('由'+(item.previous==='OPEN'?'开启':'关闭')+'变为'+(item.state==='OPEN'?'开启':'关闭')).fontSize(this.readableSize(14)).fontColor(INK).layoutWeight(1)
+            Text(this.doorRecordTime(item.observed_at)).fontSize(this.readableSize(13)).fontColor(SUB)
+          }.width('100%').padding({top:14,bottom:14}).border({width:{bottom:0.5},color:CareTheme.line})
         },(item:DoorRecord)=>''+item.observed_at)
-        if(!this.doorRecords.items.length){Text('等待首次实际开关变化，初始状态不计为开关事件').fontSize(13).fontColor(SUB)}
-      }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%').margin({top:14})
-    }else if(this.doorRecordMessage){Text(this.doorRecordMessage).fontSize(13).fontColor(SUB).margin({top:12})}
+      } else {
+        Text(this.doorRecords?'等待首次实际开关变化，初始状态不计为开关事件':(this.demo?'演示模式没有真实记录，连接设备后自动同步':(this.doorRecordMessage||'正在同步门窗记录…'))).fontSize(this.readableSize(14)).fontColor(SUB).lineHeight(this.readableLine(22)).width('100%').padding({top:16,bottom:16})
+      }
+    }.padding({left:18,right:18}).width('100%').backgroundColor(Color.White).borderRadius(16)
+  }
+  @Builder
+  doorDetail() {
+    Column({space:16}) {
+      this.doorStateCard()
+      this.section({title:'房间读数',subtitle:this.roomStampCaption()})
+      this.roomReadings()
+      Text('光照与烟雾为传感器原始电压（mV）采样，不等同于照度或烟雾浓度。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(19)).width('100%')
+      this.section({title:'出入记录',subtitle:this.doorRecordCaption()})
+      this.doorRecordsCard()
+      Text('磁簧记录只反映门体开合，不能代替现场核实。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(21)).width('100%')
+    }.width('100%')
+  }
+  @Builder
+  activityDetail() {
+    Column({space:16}) {
+      Row({space:12}) {
+        this.summary({label:'活动次数',value:this.activityTotal.toString()})
+        this.summary({label:'报警次数',value:this.alarmTotal.toString()})
+        this.summary({label:'记录天数',value:this.days.length.toString()})
+      }.width('100%')
+      Text(this.lastActivity()).fontSize(this.readableSize(14)).fontColor(INK).width('100%')
+      this.section({title:'每日活动分布',subtitle:this.days.length?this.days[this.chartDay].date:'暂无日期'})
+      if(this.days.length>1){
+        Scroll(){ Row({space:8}){ ForEach(this.daysDesc(),(day:DayStats)=>{ Button(day.date.substring(5)).fontSize(this.readableSize(13)).backgroundColor(this.isSelectedDay(day)?INK:'#E6EDF0').fontColor(this.isSelectedDay(day)?'#FFFFFF':SUB).onClick(()=>{this.selectDay(day);}) },(day:DayStats)=>`${day.date}:${day.activity_total}:${day.alarm_total}`) } }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%')
+      }
+      this.chart(true)
+      this.activityReports()
+      Column({space:9}) { Text('如何理解这些数据').fontSize(this.readableSize(14)).fontWeight(FontWeight.Bold).fontColor(INK).width('100%'); Text('活动次数是人体感应从无活动变为有活动的次数，并非步数。设备关机或未覆盖的时段，不代表老人没有活动。').fontSize(this.readableSize(13)).lineHeight(this.readableLine(21)).fontColor(SUB); Text(this.demo?'当前为演示曲线，仅用于展示界面。':'仅展示设备实际保存的统计；未对时或未收到消息时，不生成虚假历史。').fontSize(this.readableSize(13)).lineHeight(this.readableLine(19)).fontColor(AMBER) }.padding(18).backgroundColor('#EDF2F3').borderRadius(16).width('100%')
+    }.width('100%')
   }
   @Builder
   devicePage() {
@@ -1633,8 +1887,10 @@ struct Index {
       this.pageTitle('我的','让每一份牵挂，都有回应')
       Row({space:14}) {
         Stack(){Circle().fill(CareTheme.softBlue).width(56).height(56);this.icon($r('app.media.user'),29)}
-        Column({space:5}){Text(this.displayName).fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(INK);Text(this.loggedIn?this.accountName:'体验用户 · 演示模式').fontSize(this.readableSize(13)).fontColor(SUB)}.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Button('编辑', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(Color.Transparent).constraintSize({minHeight:44,minWidth:52}).onClick(()=>{this.editProfile();})
+        Column({space:5}){Text(this.displayName).fontSize(this.readableSize(22)).fontWeight(FontWeight.Bold).fontColor(INK).maxLines(1);Text(this.accountLine()).fontSize(this.readableSize(13)).fontColor(SUB).maxLines(1)}.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        if(this.loggedIn&&!this.demo){
+          Button('切换', {type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).borderRadius(10).constraintSize({minHeight:44,minWidth:58}).onClick(()=>{this.switchUser='';this.switchPassword='';this.switchMessage='';this.switchOpen=true;})
+        }
       }.padding(18).backgroundColor(Color.White).borderRadius(16).width('100%')
       this.section({title:'关怀资料',subtitle:''})
       Column(){
@@ -1661,7 +1917,7 @@ struct Index {
       Column(){
         this.entryRow({icon:$r('app.media.home'),title:'家人消息',value:'好友与聊天',action:'messages'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
-        this.entryRow({icon:$r('app.media.home'),title:'家庭与账号',value:'邀请与登录设备',action:'accounts'})
+        this.entryRow({icon:$r('app.media.home'),title:'家庭与账号',value:'邀请 · 登录设备 · 改密码',action:'accounts'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.shield'),title:'无活动远程设置',value:'阈值与睡眠时段',action:'remotecare'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
@@ -1669,7 +1925,7 @@ struct Index {
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.device'),title:'NFC与家人聊天',value:'文字与回复',action:'devicecontact'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
-        this.entryRow({icon:$r('app.media.home'),title:'家庭成员',value:this.familyRole==='owner'?'邀请与权限':'查看家庭设备',action:'members'})
+        this.entryRow({icon:$r('app.media.home'),title:'家庭成员',value:this.familyRole==='owner'?'权限与邀请':'成员与权限',action:'members'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
         this.entryRow({icon:$r('app.media.device'),title:'账户与连接',value:this.loggedIn?'管理':'登录',action:'connection'})
         Divider().color(CareTheme.line).strokeWidth(0.5)
@@ -1816,6 +2072,54 @@ struct Index {
     }.width('100%')
   }
   @Builder
+  switchRowOf(name:string, role:string, server:string, localOnly:boolean) {
+    Column({space:10}) {
+      Row({space:10}) {
+        Column({space:4}) {
+          Text(name).fontSize(this.readableSize(16)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%')
+          Text(this.memberRoleLabel(role)+(localOnly?' · 本机保存':'')).fontSize(this.readableSize(12)).fontColor(localOnly?AMBER:SUB).width('100%')
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        if(name===this.accountName&&!localOnly){
+          Text('当前使用').fontSize(this.readableSize(12)).fontColor(PRIMARY)
+        }else if(this.switchUser!==name){
+          Button('切换',{type:ButtonType.Normal}).enabled(!this.switchBusy&&!this.loginBusy).height(40).borderRadius(10).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.switchUser=name;this.switchServer=server;this.switchPassword='';this.switchMessage='';})
+        }
+      }.width('100%')
+      if(this.switchUser===name&&!(name===this.accountName&&!localOnly)){
+        TextInput({text:this.switchPassword,placeholder:'输入 '+name+' 的密码'}).type(InputType.Password).height(this.elderMode?56:46).fontSize(this.readableSize(15)).backgroundColor(BG).borderRadius(10).onChange((v:string)=>{this.switchPassword=v;})
+        Row({space:8}){
+          Button(this.switchBusy?'登录中…':'登录并切换',{type:ButtonType.Normal}).enabled(!this.switchBusy).layoutWeight(1).height(44).borderRadius(10).fontSize(this.readableSize(14)).backgroundColor(PRIMARY).onClick(()=>{this.signInSwitch();})
+          Button('取消',{type:ButtonType.Normal}).enabled(!this.switchBusy).height(44).borderRadius(10).fontSize(this.readableSize(14)).fontColor(SUB).backgroundColor(BG).onClick(()=>{this.switchUser='';this.switchPassword='';})
+        }.width('100%')
+      }
+    }.width('100%').padding(14).backgroundColor(Color.White).borderRadius(12).border({width:0.5,color:CareTheme.line})
+  }
+  @Builder
+  accountSwitchSheet() {
+    Scroll() {
+      Column({space:12}) {
+        Row() {
+          Text('切换账号').fontSize(this.readableSize(23)).fontWeight(FontWeight.Bold).fontColor(INK)
+          Blank()
+          Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{if(!this.switchBusy){this.switchOpen=false;this.switchUser='';this.switchPassword='';}})
+        }.width('100%')
+        Text('每次切换都要输入该账号自己的密码，密码只用于本次登录，不保存在手机上。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
+        if(this.loggedIn){this.switchRowOf(this.accountName,this.knownRole(this.accountName),this.api.base,false)}
+        if(this.members.filter((m:HouseholdMember)=>m.username!==this.accountName).length){
+          Text('同一家庭的其他成员').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%').margin({top:4})
+          ForEach(this.members.filter((m:HouseholdMember)=>m.username!==this.accountName),(m:HouseholdMember)=>{this.switchRowOf(m.username,m.role,this.api.base,false)},(m:HouseholdMember)=>m.username)
+        }
+        if(this.localExtras().length){
+          Text('本机保存过的其他账号').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(INK).width('100%').margin({top:4})
+          ForEach(this.localExtras(),(entry:SavedAccount)=>{this.switchRowOf(entry.username,entry.role,entry.server,true)},(entry:SavedAccount)=>entry.server+'|'+entry.username)
+        }
+        if(!this.loggedIn){Text('当前未登录。请先在“连接设置”里登录一个账号。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))}
+        if(this.switchMessage){Text(this.switchMessage).fontSize(this.readableSize(13)).fontColor(this.switchMessage.startsWith('已切换')?PRIMARY:AMBER).width('100%').lineHeight(this.readableLine(20))}
+        Button('添加其他账号',{type:ButtonType.Normal}).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).width('100%').borderRadius(10).onClick(()=>{this.switchOpen=false;this.switchUser='';this.switchPassword='';this.userDraft='';this.passwordDraft='';this.settingsOpen=true;})
+      }.padding(20).width('100%')
+    }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(CareTheme.background).borderRadius(16).scrollBar(BarState.Off)
+  }
+  @Builder
   profileSheet() {
     Scroll() {
       Column({space:14}) {
@@ -1893,7 +2197,12 @@ struct Index {
           Button(this.claimBusy?'正在同步…':this.selected?.claim?(this.selected?.claim?.username===this.accountName?'释放认领':'释放他人认领'):'我来处理').fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:44}).enabled(!this.claimBusy&&!this.noteSaving&&(!this.selected?.claim||this.selected?.claim?.username===this.accountName||this.familyRole==='owner')).onClick(()=>{this.claimAlarm(!!this.selected?.claim);})
           Text('认领与处理记录不会解除设备报警').fontSize(this.readableSize(12)).fontColor(SUB).layoutWeight(1)
         }.width('100%')
-      }else{Text('当前账号可查看记录，没有处置权限').fontSize(this.readableSize(13)).fontColor(AMBER).width('100%')}
+      }else{Column({space:8}){
+        Text('当前账号可查看记录，没有处置权限').fontSize(this.readableSize(13)).fontColor(AMBER).width('100%')
+        Button(this.remindBusy?'正在提醒…':'提醒家人查看处理',{type:ButtonType.Normal}).enabled(!this.remindBusy).constraintSize({minHeight:44}).width('100%').borderRadius(10).fontSize(this.readableSize(14)).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).onClick(()=>{this.remindAlarm();})
+        Text('提醒只会通知有处置权限的成员，不会改变这条报警的状态').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(19))
+        if(this.remindMessage){Text(this.remindMessage).fontSize(this.readableSize(12)).fontColor(this.remindMessage.indexOf('未发送')>=0?AMBER:PRIMARY).width('100%').lineHeight(this.readableLine(19))}
+      }.width('100%').alignItems(HorizontalAlign.Start)}
       ForEach(this.notes,(note:NoteItem,index:number)=>{ Text(`${resolutionLabel(note.resolution)} · ${note.username||'护理人员'}${note.account_deleted?'（账号已删除）':''}：${note.note}`).fontSize(this.readableSize(13)).fontColor(SUB).padding(10).width('100%').backgroundColor(BG).borderRadius(10) },(_note:NoteItem,index:number)=>index.toString())
       Row({space:8}) { Button('已处理').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='handled'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='handled'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='handled';}); Button('误报').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='false_alarm'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='false_alarm'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='false_alarm';}); Button('需跟进').fontSize(this.readableSize(13)).backgroundColor(this.resolution==='follow_up'?PRIMARY:'#E7EDF0').fontColor(this.resolution==='follow_up'?'#FFFFFF':SUB).enabled(!this.noteSaving).onClick(()=>{this.resolution='follow_up';}) }.width('100%')
       Text('先选择处置结果，再点击“保存处理记录”。成功后关闭详情；只保存这条事件的处理说明，不解除设备报警。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%')
@@ -1910,11 +2219,21 @@ struct Index {
     }.padding(22).width('100%')
     }.width('94%').constraintSize({maxHeight:'84%'}).backgroundColor(Color.White).borderRadius(16).scrollBar(BarState.Off)
   }
+  private detailTitle(): string {
+    return this.detail==='door'?'房门':this.detail==='reports'?'活动报告':this.detail==='activity'?'活动记录':this.detail==='members'?'家庭成员':this.detail==='voice'?'语音助手':this.detail==='diagnostics'?'技术诊断':'守护说明';
+  }
+  @Builder
+  detailHeader() {
+    Row({space:8}) {
+      Button({type:ButtonType.Normal}){this.icon($r('app.media.back'),24)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.detail='';})
+      Text(this.detailTitle()).fontSize(this.readableSize(24)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1)
+    }.width('100%').padding({left:20,right:20,top:4,bottom:8})
+  }
   @Builder
   detailPage() {
     Column({space:16}) {
-      Row({space:8}){Button({type:ButtonType.Normal}){this.icon($r('app.media.back'),24)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.detail='';});Text(this.detail==='door'?'房门与出入记录':this.detail==='reports'?'活动报告':this.detail==='activity'?'人体活动':this.detail==='members'?'家庭成员':this.detail==='voice'?'语音助手':this.detail==='diagnostics'?'技术诊断':'守护说明').fontSize(this.readableSize(24)).fontWeight(FontWeight.Bold).fontColor(INK).layoutWeight(1)}.width('100%')
-      if(this.detail==='door'){this.doorHistory();Button('查看房间节点').fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).constraintSize({minHeight:48}).width('100%').onClick(()=>{router.pushUrl({url:'pages/Nodes',params:{kind:'environment'}});});}
+      if(this.detail==='door'){this.doorDetail();}
+      else if(this.detail==='activity'){this.activityDetail();}
       else if(this.detail==='reports'){this.activityReports();}
       else if(this.detail==='members'){this.familyMembers();}
       else if(this.detail==='voice'){this.voicePage();}
@@ -1939,6 +2258,7 @@ struct Index {
     Stack({alignContent:Alignment.Center}) {
       Column() {
         if (this.demo || this.simulated) { Text(this.demo?'演示环境 · 所有数据仅用于展示':'模拟后端 · 非真实设备数据').fontSize(this.readableSize(13)).fontColor(CareTheme.warmInk).width('100%').textAlign(TextAlign.Center).padding({top:5,bottom:5}).backgroundColor(CareTheme.warmSurface) }
+        if(this.detail){this.detailHeader()}
         Scroll(this.pageScroller) {
           Column() { if(this.detail){this.detailPage()} else if(this.loggedIn&&!this.allowed('view')&&this.tab!==1&&this.tab!==4){this.incidentAccessPage()} else if(this.tab===0){this.overview()} else if(this.tab===1){this.alarmsPage()} else if(this.tab===2){this.trendsPage()} else if(this.tab===3){this.devicePage()} else {this.userPage()} }.padding({left:20,right:20,bottom:24}).width('100%')
         }.layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off).width('100%')
@@ -1949,11 +2269,15 @@ struct Index {
         if(this.settingsOpen){this.settingsSheet()}else if(this.profileOpen){this.profileSheet()}else{this.alarmSheet()}
       }
       if(this.livingOpen){this.livingSheet()}
-      if (this.alertQueue.length > 0 && !this.settingsOpen && !this.profileOpen && !this.livingOpen && this.selected === null) {
+      if(this.switchOpen){
+        Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.switchBusy){this.switchOpen=false;this.switchUser='';this.switchPassword='';}})
+        this.accountSwitchSheet()
+      }
+      if (this.alertQueue.length > 0 && !this.settingsOpen && !this.profileOpen && !this.livingOpen && !this.switchOpen && this.selected === null) {
         Rect().fill('#880B2028').width('100%').height('100%')
         this.incomingSheet()
       }
-      if(this.medicineNotice && this.alertQueue.length===0 && !this.settingsOpen && !this.profileOpen && !this.livingOpen && this.selected===null && this.livingFresh()) {
+      if(this.medicineNotice && this.alertQueue.length===0 && !this.settingsOpen && !this.profileOpen && !this.livingOpen && !this.switchOpen && this.selected===null && this.livingFresh()) {
         Rect().fill('#880B2028').width('100%').height('100%')
         this.medicineSheet()
       }

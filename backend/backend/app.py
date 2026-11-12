@@ -538,7 +538,7 @@ def create_app(settings=None, cloud=None):
                 except HTTPException:
                     await ws.close(code=4403); return
                 # Incident-only roles never receive health, camera or command payloads.
-                if 'view' not in homes.permissions(current['username']) and event['type'] not in ('alarm','alarm_note','alarm_claim','ping','resync_required','message'): continue
+                if 'view' not in homes.permissions(current['username']) and event['type'] not in ('alarm','alarm_note','alarm_claim','alarm_remind','ping','resync_required','message'): continue
                 if event.get('type') == 'message':
                     try: chats.require_member(event.get('conversation_id'), current['username'])
                     except HTTPException: continue
@@ -873,6 +873,21 @@ def create_app(settings=None, cloud=None):
             db.execute('DELETE FROM alarm_claims WHERE mode=? AND device=? AND event_key=?',(settings.mode,device,event_key))
         await publish(device,'alarm_note',{'event_key':event_key,'resolution':body.resolution})
         return envelope({'note_id':cur.lastrowid,'event_key':event_key,'username':user['username']})
+
+    # Read-only responders cannot handle an alarm, but they must be able to ask
+    # someone who can. This only raises attention; it never changes alarm state.
+    remind_at = {}
+    @app.post('/api/v1/devices/{device}/alarms/{event_key}/remind',status_code=202)
+    async def remind_alarm(device,event_key,user=Depends(session)):
+        check_device(device,user,permission='alarms.read')
+        with store.connection() as db:
+            if not db.execute('SELECT 1 FROM documents WHERE mode=? AND device=? AND kind=? AND key=?',(settings.mode,device,'alarm',event_key)).fetchone(): raise HTTPException(404,'Alarm not found')
+        key=(device,event_key,user['username'])
+        if time.time()-remind_at.get(key,0)<60: raise HTTPException(429,'请稍后再提醒，同一事件每分钟最多一次')
+        remind_at[key]=time.time()
+        created=time.time()
+        await publish(device,'alarm_remind',{'event_key':event_key,'username':user['username'],'created':created})
+        return envelope({'event_key':event_key,'username':user['username'],'created':created,'interval':60})
 
     @app.get('/api/v1/devices/{device}/alarms/{event_key}/notes')
     def notes(device,event_key,user=Depends(session)):

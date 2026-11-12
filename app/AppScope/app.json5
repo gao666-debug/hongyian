@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.zhian.eldercare",
     "vendor": "Zhian",
-    "versionCode": 1016000,
-    "versionName": "1.16.0",
+    "versionCode": 1016001,
+    "versionName": "1.16.1",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

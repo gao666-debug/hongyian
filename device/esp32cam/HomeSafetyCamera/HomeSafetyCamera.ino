@@ -84,9 +84,24 @@ void streamTask(void *) {
   }
 }
 
+// Smooth viewing is optional but must not stay disabled for the whole boot.
+// The old 8 KB stack could fail to allocate once the 12 KB upload task existed,
+// which left /stream-ticket answering 503 forever. Keep the stack small and
+// retry on demand so a temporarily fragmented heap does not lock users out.
+bool ensureStreamTask() {
+  if (streamAvailable) return true;
+  if (xTaskCreate(streamTask, "camera-stream", 4096, nullptr, 1, nullptr) == pdPASS) {
+    streamAvailable = true;
+    Serial.println("[camera] stream task ready (4096 bytes)");
+  } else {
+    Serial.printf("[camera] stream task allocation failed; free_heap=%u\n", ESP.getFreeHeap());
+  }
+  return streamAvailable;
+}
+
 void statusPage() {
   if (!authorized()) return;
-  String json = "{\"firmware\":\"camera-v0.3.1\",\"camera_ready\":";
+  String json = "{\"firmware\":\"camera-v0.3.2\",\"camera_ready\":";
   json += cameraReady ? "true" : "false";
   json += ",\"camera_error\":" + String(static_cast<int>(cameraError));
   json += ",\"wifi_connected\":";
@@ -142,7 +157,8 @@ void initCamera() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n[boot] YiHongAn Camera v0.3.1");
+  Serial.println("\n[boot] YiHongAn Camera v0.3.2");
+  Serial.printf("[boot] cloud_enabled=%d free_heap=%u psram=%u\n", CLOUD_ENABLED, ESP.getFreeHeap(), ESP.getPsramSize());
   cameraLock = xSemaphoreCreateMutex();
   if (!cameraLock) {
     Serial.println("[camera] mutex allocation failed");
@@ -157,7 +173,6 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  startCloudUpload();
   server.on("/", HTTP_GET, []() {
     if (!authorized()) return;
     server.send(200, "text/html; charset=utf-8", R"HTML(<!doctype html>
@@ -180,7 +195,7 @@ window.addEventListener('pagehide',stop);
   server.on("/stream-ticket", HTTP_GET, []() {
     if (!authorized()) return;
     server.sendHeader("Cache-Control", "no-store");
-    if (!streamAvailable || !cameraReady) {
+    if (!ensureStreamTask() || !cameraReady) {
       server.send(503, "application/json", "{\"error\":\"stream_unavailable\"}");
       return;
     }
@@ -192,8 +207,9 @@ window.addEventListener('pagehide',stop);
   server.begin();
   streamServer.on("/stream", HTTP_GET, liveStream);
   streamServer.begin();
-  streamAvailable = xTaskCreate(streamTask, "camera-stream", 8192, nullptr, 1, nullptr) == pdPASS;
-  if (!streamAvailable) Serial.println("[camera] stream task allocation failed");
+  // Allocate the small stream task before the 12 KB upload task fragments the heap.
+  ensureStreamTask();
+  startCloudUpload();
 }
 
 void loop() {

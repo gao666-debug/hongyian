@@ -33,6 +33,10 @@ struct HomeCameraPage {
   private viewing:CameraViewing=new CameraViewing();
   @State smooth:boolean=true;
   @State remote:boolean=true;
+  @State needBinding:boolean=false;
+  @State cameraOnline:boolean=false;
+  @State neverReceived:boolean=false;
+  private smoothFailures:number=0;
   @State recording:boolean=false;
   @State clipReady:boolean=false;
   @State mediaMessage:string='';
@@ -83,6 +87,7 @@ struct HomeCameraPage {
   private offerFrame(jpeg:Uint8Array,generation:number):void{
     if(generation!==this.generation){return;}
     this.latest=jpeg;this.lastFrameAt=Date.now();
+    this.smoothFailures=0;this.needBinding=false;this.failed=false;
     const now=Date.now();
     if(this.recording&&(!this.recorded.length||now-this.recorded[this.recorded.length-1].at>=200)){
       if(this.recordBytes+jpeg.length>16777216){this.finishRecording();}
@@ -109,14 +114,32 @@ struct HomeCameraPage {
     if(this.remote){
       if(generation!==this.generation||!DeviceSession.backend.token){return;}
       this.feed.startRemote(DeviceSession.backend,(jpeg:Uint8Array)=>{this.offerFrame(jpeg,generation);},()=>{
-        if(generation===this.generation){this.failed=true;this.message='远程画面中断，等待摄像头恢复上传';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);}
+        if(generation!==this.generation){return;}
+        this.failed=true;
+        if(this.smooth){this.smoothFailures++;}
+        // Continuous video is the nicer path but it must not strand the user:
+        // fall back to single-frame polling instead of retrying forever.
+        if(this.smooth&&this.smoothFailures>=2){
+          this.smooth=false;this.saveSmooth(false);
+          this.message='连续视频暂不可用，已自动改用省流取图';
+          this.refreshFrame(generation);return;
+        }
+        this.message='远程画面中断，正在重连';
+        this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);
       });return;
     }
     try{await this.feed.start(this.source,this.username,this.password,(jpeg:Uint8Array)=>{this.offerFrame(jpeg,generation);},()=>{
       if(generation===this.generation){this.failed=true;this.message='视频中断，正在重新连接';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},2000);}
     });}catch(error){if(generation===this.generation){this.failed=true;this.message='流畅连接失败，可切换省流模式';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);}}
   }
-  private changeMode():void{if(this.recording){return;}this.smooth=!this.smooth;if(this.source){this.connect(true);}}
+  private changeMode():void{
+    if(this.recording){return;}
+    this.smooth=!this.smooth;this.smoothFailures=0;this.saveSmooth(this.smooth);
+    if(this.source){this.connect(true);}
+  }
+  private async saveSmooth(value:boolean):Promise<void>{
+    try{const pref=await preferences.getPreferences(getContext(this),{name:'yihongan-camera'});await pref.put('smooth',value);await pref.flush();}catch(error){}
+  }
   private async saveRemote(value:boolean):Promise<void>{
     try{const pref=await preferences.getPreferences(getContext(this),{name:'yihongan-camera'});await pref.put('remote',value);await pref.flush();}catch(error){}
   }
@@ -137,6 +160,7 @@ struct HomeCameraPage {
       const pref=await preferences.getPreferences(context,{name:'yihongan-camera'});
       this.address=await pref.get('address','') as string;
       this.remote=await pref.get('remote',true) as boolean;
+      this.smooth=await pref.get('smooth',true) as boolean;
     } catch (error) { this.address=''; }
   }
   private async releaseStream(): Promise<void> {
@@ -186,24 +210,23 @@ struct HomeCameraPage {
     this.source='';
     this.message='正在查找摄像头…';
     try {
-      if(!manual&&!explicit){
-        // Pick the transport the server can actually serve before touching the network.
-        let bound=false;
+      if(!manual&&!explicit&&this.remote){
+        // Remote is the primary path. A missing binding must never silently turn
+        // into a blind scan of 254 LAN addresses that cannot possibly succeed here.
         try {
           const api=DeviceSession.backend;
           const response=await api.request(api.path('camera'));
           if(generation!==this.generation){return;}
           const status=response.data as RemoteCameraStatus;
-          bound=!!status.configured;
-          if(bound){this.remote=true;}
-          else if(this.remote){
-            this.remote=false;
-            this.message='远程观看尚未绑定，已自动改用同一网络直连';
-            this.saveRemote(false);
+          this.cameraOnline=!!status.online;
+          this.neverReceived=!status.received_at;
+          if(!status.configured){
+            this.needBinding=true;this.source='';
+            this.message='远程观看尚未开通';
+            return;
           }
         } catch(error) { /* Keep the locally remembered choice when status is unavailable. */ }
         if(generation!==this.generation){return;}
-        if(!bound){this.source='';}
       }
       if(this.remote){
         const api=DeviceSession.backend;
@@ -214,7 +237,8 @@ struct HomeCameraPage {
         await this.viewing.start(api,(message:string)=>{if(generation===this.generation){this.failed=true;this.message=message;}});
         if(generation!==this.generation){return;}
         this.source=api.base;this.settingsOpen=false;
-        this.message=status.online?'已连接服务器，正在加载画面':'正在唤醒摄像头，请稍候…';
+        this.cameraOnline=!!status.online;this.neverReceived=!status.received_at;
+        this.message=status.online?'已连接服务器，正在加载画面':(status.received_at?'正在唤醒摄像头，请稍候…':'摄像头还没上传过画面，请确认已通电并连上 Wi-Fi');
         if(this.smooth){this.startFeed(generation);}else{this.refreshFrame(generation);}
         return;
       }
@@ -233,6 +257,15 @@ struct HomeCameraPage {
     } catch (error) {
       if (generation===this.generation) { this.failed=true;this.message=(error as Error).message; }
     } finally { if(generation===this.generation){this.busy=false;} }
+  }
+  private emptyHint():string{
+    if(this.needBinding){return '需要在服务器上为这台主机签发一次摄像头令牌，然后点“重新检查”。';}
+    if(this.remote){
+      return this.neverReceived
+        ?'摄像头从未向服务器上传过画面。请确认它已通电、连上家里 Wi-Fi，并且烧录的是支持远程上传的固件。'
+        :'摄像头通电联网后画面会自动出现，不需要额外操作。';
+    }
+    return '手机连到与摄像头相同的热点后，点下方按钮自动查找；找到一次就会记住地址。';
   }
   build() {
     Column({space:16}) {
@@ -260,11 +293,11 @@ struct HomeCameraPage {
           Text(this.recording?'● 录像中 · 最长 60 秒':this.smooth?'连续视频 · 中断自动重连':'省流取图 · 中断自动重试').fontSize(13).fontColor(CareTheme.secondary).margin(12)
         }.layoutWeight(1).width('100%').backgroundColor(Color.White).borderRadius(16)
       } else {
-        Column({space:18}) {
+        Column({space:14}) {
           Blank()
-          Image($r('app.media.camera')).width(60).height(60)
-          Text(this.busy?'正在寻找家中摄像头':'画面，由你开启').fontSize(20).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink)
-          Text(this.remote?'摄像头通电联网后，登录家庭账号即可远程查看。':'首次只需一次配对：手机连到与摄像头相同的热点（GB），点下方按钮自动找到并记住地址；以后再打开直接出画面。').fontSize(14).fontColor(CareTheme.secondary).textAlign(TextAlign.Center).lineHeight(23).padding({left:20,right:20})
+          Image($r('app.media.camera')).width(56).height(56)
+          Text(this.busy?'正在连接家中画面':this.needBinding?'远程观看还没开通':this.remote?'等待摄像头上传画面':'等待同一网络里的摄像头').fontSize(20).fontWeight(FontWeight.Medium).fontColor(CareTheme.ink)
+          Text(this.emptyHint()).fontSize(14).fontColor(CareTheme.secondary).textAlign(TextAlign.Center).lineHeight(23).padding({left:20,right:20})
           Blank()
         }.layoutWeight(1).width('100%').backgroundColor(CareTheme.softBlue).borderRadius(16)
       }
@@ -278,8 +311,9 @@ struct HomeCameraPage {
       if(this.clipReady){Button('保存录像（AVI）').enabled(!this.saving).fontSize(13).onClick(()=>{this.saveMedia(true);})}
       if(this.mediaMessage){Text(this.mediaMessage).fontSize(13).fontColor(CareTheme.secondary)}
       Row({space:10}) {
-        Button(this.busy?'连接中…':this.source?'重新连接':'一键连接摄像头').enabled(!this.busy).height(48).layoutWeight(1).backgroundColor(CareTheme.primary).fontSize(15).onClick(()=>{this.connect();})
+        Button(this.busy?'连接中…':this.source?'重新连接':this.needBinding?'重新检查':'一键连接摄像头').enabled(!this.busy).height(48).layoutWeight(1).backgroundColor(CareTheme.primary).fontSize(15).onClick(()=>{this.needBinding=false;this.connect();})
         if(this.busy||this.source){Button(this.busy?'取消':'停止').height(48).fontSize(14).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).onClick(()=>{this.stop();})}
+        else if(this.needBinding){Button('同网直连').height(48).fontSize(14).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).onClick(()=>{this.needBinding=false;this.changeAccess(false);})}
       }.width('100%')
       Text('连接设置 '+(this.settingsOpen?'⌃':'⌄')).fontSize(13).fontColor(CareTheme.primary).onClick(()=>{this.settingsOpen=!this.settingsOpen;})
       if(this.settingsOpen&&!this.remote){

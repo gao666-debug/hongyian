@@ -70,7 +70,7 @@ export class Backend {
   async binary(path: string): Promise<ArrayBuffer> {
     const client = http.createHttp();
     const options: http.HttpRequestOptions = {header:{Authorization:'Bearer '+this.token},
-      expectDataType:http.HttpDataType.ARRAY_BUFFER,usingCache:false,connectTimeout:8000,readTimeout:10000};
+      expectDataType:http.HttpDataType.ARRAY_BUFFER,usingCache:false,connectTimeout:20000,readTimeout:10000};
     const cert=this.certificatePath(); if(cert){options.caPath=cert;}
     try {
       const response=await client.request(this.base+path,options);
@@ -85,7 +85,7 @@ export class Backend {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache, no-store' };
     if (this.token !== '') { headers['Authorization'] = 'Bearer ' + this.token; }
     const options: http.HttpRequestOptions = {
-      method: method, header: headers, usingCache: false, connectTimeout: 8000, readTimeout: readTimeout,
+      method: method, header: headers, usingCache: false, connectTimeout: 20000, readTimeout: readTimeout,
       expectDataType: http.HttpDataType.STRING
     };
     if (certificate !== '') { options.caPath = certificate; }
