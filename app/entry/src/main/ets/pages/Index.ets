@@ -1739,7 +1739,14 @@ struct Index {
         Blank()
         Button({type:ButtonType.Normal}){this.icon($r('app.media.refresh'),20)}.width(44).height(44).backgroundColor(Color.Transparent).onClick(()=>{this.refresh(true);})
       }.width('100%').margin({bottom:16})
-      if(this.pendingCount()>0){Text(this.pendingCount()+' 条异常需要核实').fontSize(this.readableSize(14)).fontColor(RED).padding(12).backgroundColor(CareTheme.alarmSurface).borderRadius(10).width('100%').margin({bottom:12})}
+      if(this.pendingCount()>0){
+        Row({space:10}){
+          Text(this.pendingCount()+' 条异常需要核实').fontSize(this.readableSize(14)).fontColor(RED).layoutWeight(1)
+          if(this.allowed('alarms.handle')){
+            Button(this.careActionBusy?'处理中…':'批量处理',{type:ButtonType.Normal}).fontSize(this.readableSize(13)).fontColor(PRIMARY).backgroundColor(Color.White).constraintSize({minHeight:44,minWidth:96}).borderRadius(12).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy).onClick(()=>{this.chooseBatchScope();})
+          }
+        }.padding(12).backgroundColor(CareTheme.alarmSurface).borderRadius(10).width('100%').margin({bottom:12})
+      }
       if(this.allowed('alarms.handle') && this.oldUnresolved().length>0){
         Row({space:10}) {
           Text('另有 '+this.oldUnresolved().length+' 条旧记录未标记处理').fontSize(this.readableSize(13)).fontColor(SUB).layoutWeight(1).lineHeight(this.readableLine(19))
