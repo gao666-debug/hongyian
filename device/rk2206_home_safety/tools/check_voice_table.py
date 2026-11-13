@@ -74,7 +74,7 @@ def main():
     if not say:
         errors.append("su_03t.h 里没有解析到 SU03T_SAY_* 宏，检查文件是否被改过")
 
-    # 1. 播报词条：CSV 里 4~22 必须与头文件宏一一对应，且不重复、不缺号。
+    # 1. 播报词条：CSV 里 4~23 必须与头文件宏一一对应，且不重复、不缺号。
     csv_say = {}
     for row in rows:
         cat = row.get("类别", "")
@@ -102,7 +102,7 @@ def main():
     if extra:
         errors.append("词条表有、头文件没定义：%s" % ", ".join(str(i) for i in extra))
 
-    for idx in range(4, 23):
+    for idx in range(4, 24):
         if idx not in csv_say:
             errors.append("词条 %d 在表里不存在" % idx)
 
@@ -176,13 +176,13 @@ def main():
     if args.frames:
         print("\n=== 播报自检帧（发到 UART2，115200 8N1）===")
         for idx in sorted(csv_say):
-            if idx > 22:
+            if idx > 23:
                 continue
             if idx <= 3:
                 print("%2d  AA 55 %02X <double 小端> 55 AA   %s" % (idx, idx, text_field.get(idx, "")))
             else:
                 print("%2d  AA 55 %02X 00 55 AA                 %s" % (idx, idx, text_field.get(idx, "")))
-        print("\n提示：编译时加 -DSU03T_SELF_TEST=1，上电即按顺序自播 4~22，")
+        print("\n提示：编译时加 -DSU03T_SELF_TEST=1，上电即按顺序自播 4~23，")
         print("      比手工发帧省事；哪条没声音，就是那号词条没烧进去。")
 
     return 1 if errors else 0

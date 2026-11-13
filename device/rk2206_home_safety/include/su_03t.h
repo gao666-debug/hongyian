@@ -60,7 +60,7 @@
 #define SU03T_PFX_PAGE          0x15    /* 01 记录一页  02 记录二页  03 返回主页 */
 
 /* 主板 → 模块：语音应答词条编号（10 起，与报警 4~9 不冲突）。
- * 需在模块上按本表配置 10~22 号固定句，未配置时发送会被模块忽略。 */
+ * 需在模块上按本表配置 10~23 号固定句，未配置时发送会被模块忽略。 */
 #define SU03T_SAY_LIGHT_ON      10      /* 已开灯 */
 #define SU03T_SAY_LIGHT_OFF     11      /* 已关灯 */
 #define SU03T_SAY_LIGHT_AUTO    12      /* 灯光已切到自动 */
@@ -74,9 +74,21 @@
 #define SU03T_SAY_GAS_BAD       20      /* 燃气浓度偏高，请开窗通风 */
 #define SU03T_SAY_GAS_OK        21      /* 燃气未检出异常 */
 #define SU03T_SAY_BUSY          22      /* 设备正忙，请稍后再试 */
+#define SU03T_SAY_READY         23      /* 语音已就绪（上电播一次，用于确认串口与词条都通） */
+
+/* 上电播报「语音已就绪」：听到这句说明 UART2 通、模块在、23 号词条也烧进去了。
+ * 模块未配置 23 号时会被静默忽略，不会误播别的词条，因此默认开启。
+ * 若不想每次开机都念，编译时加 -DSU03T_BOOT_READY=0。 */
+#ifndef SU03T_BOOT_READY
+#define SU03T_BOOT_READY 1
+#endif
+
+/* 报警/静音期间，动作应答（已开灯、已静音…）延后这么久再播，
+ * 避免把正在播的报警句子顶掉。 */
+#define SU03T_REPLY_DELAY_ALARM_MS 2500
 
 /* 语音应答词条开关：跟随报警专用词条开关，避免工厂模块把应答播成温湿度。
- * 模块配好 10~22 号词条后，把 VOICE_DEDICATED_IDX 置 1 即可同时启用。 */
+ * 模块配好 10~23 号词条后，把 VOICE_DEDICATED_IDX 置 1 即可同时启用。 */
 #ifndef SU03T_ACTION_VOICE_ENABLED
 #define SU03T_ACTION_VOICE_ENABLED SU03T_ALARM_PROFILE_ENABLED
 #endif

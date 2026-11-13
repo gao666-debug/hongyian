@@ -41,7 +41,7 @@
 #define VOICE_SAY_MAX 6
 
 /* 上电语音自检：烧录新词条后临时置 1（编译参数 -DSU03T_SELF_TEST=1），
- * 上电后从 4 号到 22 号逐个播报一遍，每句间隔 2 秒，约 38 秒播完，
+ * 上电后从 4 号到 23 号逐个播报一遍，每句间隔 2 秒，约 40 秒播完，
  * 用来确认哪条没烧进去、播错或没声音。验证完请改回 0，避免每次开机都念。
  * 自检走线程独立计时，不占用 VOICE_SAY_MAX 应答队列。 */
 #ifndef SU03T_SELF_TEST
@@ -66,7 +66,7 @@ static uint64_t s_pfx_up;
 static voice_say_t s_say[VOICE_SAY_MAX];
 static int s_say_n;
 static int s_page = -1;
-static char s_note[24];
+static char s_note[32];
 static uint64_t s_note_up;
 
 #if SU03T_SELF_TEST
@@ -86,7 +86,7 @@ static void write_frame(const uint8_t *data, unsigned size)
 }
 
 /* 固定句应答帧：AA 55 <index> 00 55 AA。
- * 只在模块已配置 10~22 号应答词条时发送，工厂模块下整体不发送。 */
+ * 只在模块已配置 10~23 号应答词条时发送，工厂模块下整体不发送。 */
 static void send_phrase(uint8_t index)
 {
 #if SU03T_ACTION_VOICE_ENABLED
@@ -100,8 +100,17 @@ static void send_phrase(uint8_t index)
 static void say_push(uint8_t index, uint8_t is_value, double value, uint64_t now, unsigned delay)
 {
     /* 数值帧（温湿度/光照）沿用出厂模板，始终可用；
-     * 固定句应答需要模块配好 10~22 号词条，未配置时整句不发。 */
+     * 固定句应答需要模块配好 10~23 号词条，未配置时整句不发。 */
     if (!is_value && !SU03T_ACTION_VOICE_ENABLED) return;
+    /* 同一句应答重复触发时只保留一条：连按两下开灯不必念两遍。 */
+    if (!is_value) {
+        for (int i = 0; i < s_say_n; ++i) {
+            if (!s_say[i].is_value && s_say[i].index == index) {
+                s_say[i].due = now + delay;
+                return;
+            }
+        }
+    }
     if (s_say_n >= VOICE_SAY_MAX) {
         memmove(s_say, s_say + 1, sizeof(s_say[0]) * (VOICE_SAY_MAX - 1));
         s_say_n = VOICE_SAY_MAX - 1; /* 丢最旧的一条，保证最新动作有应答 */
@@ -113,7 +122,17 @@ static void say_push(uint8_t index, uint8_t is_value, double value, uint64_t now
     s_say_n++;
 }
 
-static void say_phrase(uint8_t index, uint64_t now) { say_push(index, 0, 0, now, 0); }
+/* 报警或静音期间，模块正在念报警句。此时动作应答如果立刻发，
+ * 模块会当场切句，报警播到一半被「已开灯」顶掉，所以统一延后。
+ * 报警句本身走 su03t_send_u8_msg，直接发，不受这里影响。 */
+static unsigned reply_delay_ms(void)
+{
+    safety_state_t state;
+    safety_state_get(&state);
+    return (state.alarm || state.mute) ? SU03T_REPLY_DELAY_ALARM_MS : 0;
+}
+
+static void say_phrase(uint8_t index, uint64_t now) { say_push(index, 0, 0, now, reply_delay_ms()); }
 
 static void say_flush(uint64_t now)
 {
@@ -246,15 +265,28 @@ void su03t_send_u8_msg(uint8_t index, uint8_t dat)
 /***************************************************************
  * 说    明: 数值/状态查询的应答
  ***************************************************************/
+/* 报警或静音期间的查询：报警优先，但不装哑巴。
+ * 老人问一句总要有个回应，所以仍播「暂不可用」，只是这句会被
+ * reply_delay_ms() 自动延后，等报警句念完再说，不会把报警顶掉。 */
+static bool query_blocked(uint64_t now)
+{
+    safety_state_t state;
+    safety_state_get(&state);
+    if (!state.alarm && !state.mute) return false;
+    printf("[voice] query skipped: alarm/mute active\r\n");
+    say_phrase(SU03T_SAY_NO_DATA, now);
+    return true;
+}
+
 static void answer_query(uint8_t command, uint64_t now)
 {
     /* Factory command 3 means light, not gas. */
     if (command != 1 && command != 2) return;
+    if (query_blocked(now)) return;
     safety_state_t state;
     safety_quality_t quality;
     safety_state_get(&state);
     safety_state_quality(&state, (unsigned int)(now / 1000), &quality);
-    if (state.alarm || state.mute) return; /* Safety alarm/mute wins over numeric queries. */
     if (!quality.env_available) {
         printf("[voice] query skipped: temperature/humidity unavailable\r\n");
         say_phrase(SU03T_SAY_NO_DATA, now);
@@ -268,9 +300,9 @@ static void answer_gas(uint64_t now)
 {
     safety_state_t state;
     safety_config_t cfg;
+    if (query_blocked(now)) return;
     safety_state_get(&state);
     safety_config_get(&cfg);
-    if (state.alarm || state.mute) return;
     bool bad = isfinite(state.gas) && state.gas > cfg.gas_limit;
     printf("[voice] gas query ppm=%.0f limit=%.0f -> %s\r\n",
            state.gas, cfg.gas_limit, bad ? "high" : "normal");
@@ -280,8 +312,8 @@ static void answer_gas(uint64_t now)
 static void answer_light(uint64_t now)
 {
     safety_state_t state;
+    if (query_blocked(now)) return;
     safety_state_get(&state);
-    if (state.alarm || state.mute) return;
     if (!isfinite(state.light) || state.light < 0) {
         say_phrase(SU03T_SAY_NO_DATA, now);
         return;
@@ -500,7 +532,7 @@ static void su_03t_thread(void *arg)
                 send_phrase((uint8_t)s_selftest_idx);
                 printf("[voice] self test index=%d\r\n", s_selftest_idx);
                 s_selftest_due = now + 2000;
-                s_selftest_idx = s_selftest_idx >= 22 ? -1 : s_selftest_idx + 1;
+                s_selftest_idx = s_selftest_idx >= SU03T_SAY_READY ? -1 : s_selftest_idx + 1;
             }
         }
 #endif
@@ -553,10 +585,18 @@ void su03t_init(void)
         printf("Failed to create su-03t task ret:0x%x\n", ret);
     }
 
+#if SU03T_BOOT_READY && SU03T_ACTION_VOICE_ENABLED
+    /* 上电播一句「语音已就绪」，听到就说明 UART2、模块、词条三样都通；
+     * 没声音则依次查接线、波特率、23 号词条。模块从断电到能收命令约 1 秒，
+     * 所以延迟 1.5 秒再发，避免开机第一句丢帧。 */
+    say_push(SU03T_SAY_READY, 0, 0, LOS_TickCountGet(), 1500);
+    printf("[voice] boot greeting queued: index %d\r\n", SU03T_SAY_READY);
+#endif
+
 #if SU03T_SELF_TEST
     s_selftest_idx = SU03T_ACTION_VOICE_ENABLED ? 4 : -1;
     s_selftest_due = 0;
     printf("[voice] self test %s\r\n",
-           s_selftest_idx >= 0 ? "queued 4..22" : "skipped (VOICE_DEDICATED_IDX=0)");
+           s_selftest_idx >= 0 ? "queued 4..23" : "skipped (VOICE_DEDICATED_IDX=0)");
 #endif
 }
