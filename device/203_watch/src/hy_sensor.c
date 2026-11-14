@@ -402,29 +402,38 @@ static void step_update(int m2)
 /* ============================================================
  * 五点五、摔倒检测
  *
- * 判定链（先冲击、后静止，两个条件都满足才算）：
- *   1. 冲击：合加速度模长 >= 2.0g。正常人走路、坐下、拍手都在 1.5g 内，
- *      而摔倒落地瞬间通常是 3~6g，所以 2.0g 这个门限不会误报日常动作。
- *   2. 静止：冲击后 5 秒内，模长峰峰值 <= 300mg。人一旦摔倒起不来，
- *      手部几乎不动，模长稳定在 1g 附近；而正常磕碰之后必然会继续
- *      活动（抬手、走路），1 秒内峰峰值就超过 600mg，直接被排除。
+ * 判定链（失重 -> 冲击 -> 静止，三道都要过）：
+ *   0. 失重前置（硬门槛）：冲击前 900ms 内必须出现 |a|<0.7g 且持续 >=50ms。
+ *      自由落体时模长掉到 0.2~0.5g，这条只有「真掉下去」才满足；
+ *      桌面磕碰、拉线、插拔 USB 都是纯正向冲击，前面没有失重段。
+ *      —— 这一条是为了解决「板子放桌上没人动却报摔倒」的误报，
+ *         因为桌上永远「静止」，原来的静止判据对放桌上等于恒真。
+ *   1. 冲击：有失重前置时 2.0g 即可；无失重时只接受 >=3.5g 强冲击
+ *      （手拍、用力甩落，留给演示用，日常磕碰到不了）。
+ *   2. 静止：冲击后 5 秒内模长峰峰值 <=250mg。
+ *   3. 反向排除：冲击后 1 秒峰峰 >=450mg 视为「还在活动」，立即排除。
  *
  * 冲击后 500ms 内不计入静止统计：落地有回弹和抖动，那一段不是「静止」。
  *
- * 报警后不清状态，继续盯：检测到活动才解除，否则每 5 秒复报一次。
- * 这样即使人躺着不动，告警也不会自己消失。
+ * 报警后保持状态：检测到活动 -> 解除；3 分钟无人确认 -> 自动解除。
+ * 复报间隔 30 秒，避免刷屏和无效上报。
  * ============================================================ */
 
 #define FALL_IDLE      0
 #define FALL_WATCH     1        /* 已检出冲击，正在观察是否静止 */
 #define FALL_ALARM     2        /* 疑似摔倒，等人工确认或活动解除 */
 
-#define FALL_IMPACT_MG    2000  /* 冲击门限 2.0g */
+#define FALL_IMPACT_MG    1700  /* 有失重前置时的冲击门限 1.7g */
+#define FALL_IMPACT_HARD  3500  /* 无失重前置时只认强冲击 3.5g（手拍/甩落） */
+#define FALL_FF_MG         780  /* 模长 <0.78g 视为失重样本 */
+#define FALL_FF_MIN_MS      20  /* 失重需持续 >=20ms 才算真失重（约 2 个样本） */
+#define FALL_FF_WINDOW_MS  900  /* 冲击须发生在失重结束后 900ms 内 */
 #define FALL_RING_MS      500   /* 冲击后回弹期，不计入静止统计 */
 #define FALL_STILL_MS     5000  /* 静止观察窗 5 秒 */
-#define FALL_STILL_PTP    300   /* 静止判据：模长峰峰 <=300mg */
-#define FALL_MOVE_PTP     600   /* 活动判据：1 秒峰峰 >=600mg */
-#define FALL_REPEAT_MS    5000  /* 报警复报间隔 */
+#define FALL_STILL_PTP    250   /* 静止判据：模长峰峰 <=250mg */
+#define FALL_MOVE_PTP     450   /* 活动判据：1 秒峰峰 >=450mg */
+#define FALL_REPEAT_MS   30000  /* 报警复报间隔（原 5s 太密，刷屏且费流量） */
+#define FALL_TIMEOUT_MS 180000  /* 3 分钟无人确认则自动解除，避免永久挂住 */
 
 static int s_fall_state;
 static uint64_t s_fall_t0;       /* 冲击时刻 */
@@ -437,7 +446,11 @@ static uint64_t s_act_t0;
 static int s_act_ptp;            /* 上一个完整 1 秒窗的模长峰峰值 */
 static int s_act_ready;          /* 1 = s_act_ptp 是「重置后」的完整窗，才可用 */
 static int s_ring_done;          /* 1 = 已过冲击回弹期 */
-static uint64_t s_ff_ms;         /* 最近一次失重（|a|<0.6g）时刻 */
+static uint64_t s_ff_t0;         /* 本次失重起点（0=当前不在失重） */
+static uint64_t s_ff_ms;         /* 最近一次失重（|a|<0.7g）采样时刻 */
+static uint32_t s_ff_len;        /* 最近一次失重的持续时长 ms */
+static int s_fall_ff_len;        /* 本次判定的失重时长，0=无失重（强冲击旁路） */
+static uint64_t s_ignore_t;      /* 「忽略轻冲击」日志限流时刻 */
 static uint64_t s_alarm_t;       /* 上次报警时刻 */
 
 static int isqrt_u32(uint32_t v)
@@ -474,12 +487,23 @@ static const char *fall_state_name(void)
 static void fall_update(int ax, int ay, int az, uint64_t now)
 {
     int m = isqrt_u32((uint32_t)(ax * ax + ay * ay + az * az));   /* 合加速度，mg */
+    int ff_ok = 0;                   /* 1 = 冲击前确有失重前置 */
 
     if (m > g_hy.acc_peak) {
         g_hy.acc_peak = m;           /* 给状态行看，方便标定力度 */
     }
-    if (m < 600) {
-        s_ff_ms = now;               /* 记住失重时刻：真正的摔倒大多先失重 */
+    /* --- 失重跟踪：真摔倒必定「先失重、后撞击」 ---
+     * 自由落体时三轴模长会掉到 0.2~0.5g。桌面磕碰、拉线、插拔 USB
+     * 都是纯正向冲击，前面不可能出现失重段。这道门槛专门用来挡
+     * 「板子放桌上不动却报摔倒」的误报。 */
+    if (m < FALL_FF_MG) {
+        if (s_ff_t0 == 0u) {
+            s_ff_t0 = now;           /* 失重开始 */
+        }
+        s_ff_ms = now;
+        s_ff_len = (uint32_t)(now - s_ff_t0);
+    } else if (s_ff_t0 != 0u && now - s_ff_ms > 100u) {
+        s_ff_t0 = 0u;                /* 离开失重超过 100ms，本次失重作废 */
     }
 
     /* --- 活动度：1 秒滑动窗的模长峰峰值，每秒结算一次 --- */
@@ -509,6 +533,22 @@ static void fall_update(int ax, int ay, int az, uint64_t now)
     switch (s_fall_state) {
     case FALL_IDLE:
         if (m >= FALL_IMPACT_MG) {
+            /* 判定依据：失重前置（真摔）或强冲击旁路（手拍/甩落，演示用） */
+            ff_ok = (s_ff_t0 != 0u &&
+                     s_ff_len >= FALL_FF_MIN_MS &&
+                     now - s_ff_ms <= FALL_FF_WINDOW_MS);
+
+            if (!ff_ok && m < FALL_IMPACT_HARD) {
+                /* 没有失重、也不够猛：典型桌面磕碰/插拔抖动，直接丢弃。
+                 * 只更新 acc_peak，不进入观察态，更不会报警。 */
+                if (now - s_ignore_t >= 5000u) {
+                    s_ignore_t = now;
+                    printf("[hy-fall] 忽略 %d.%02dg：无失重前置\r\n",
+                           m / 1000, (m % 1000) / 10);
+                }
+                break;
+            }
+
             s_fall_state = FALL_WATCH;
             s_fall_t0 = now;
             s_fall_peak = m;
@@ -519,11 +559,17 @@ static void fall_update(int ax, int ay, int az, uint64_t now)
             s_act_max = m;
             s_act_ready = 0;
             s_ring_done = 0;
+            s_fall_ff_len = ff_ok ? (int)s_ff_len : 0;
+            s_ff_t0 = 0u;            /* 失重信号已用掉，避免复用到下一次撞击 */
             g_hy.fall_peak_mg = m;
-            printf("[hy-fall] 冲击 %d.%02dg%s，开始观察是否静止（%d 秒）\r\n",
-                   m / 1000, (m % 1000) / 10,
-                   (s_ff_ms != 0u && now - s_ff_ms <= 600u) ? "（前有失重）" : "",
-                   FALL_STILL_MS / 1000);
+
+            printf("[hy-fall] 冲击 %d.%02dg，开始观察 %d 秒\r\n",
+                   m / 1000, (m % 1000) / 10, FALL_STILL_MS / 1000);
+            if (s_fall_ff_len > 0) {
+                printf("[hy-fall] 依据：先失重 %dms 后撞击\r\n", s_fall_ff_len);
+            } else {
+                printf("[hy-fall] 依据：无失重，强冲击 %dmg\r\n", m);
+            }
         }
         break;
 
@@ -584,8 +630,8 @@ static void fall_update(int ax, int ay, int az, uint64_t now)
                        s_fall_peak / 1000, (s_fall_peak % 1000) / 10,
                        (int)((now - s_fall_t0) / 1000u),
                        (int)(((now - s_fall_t0) % 1000u) / 100u));
-                printf("[hy-fall] 抖动 %dmg 模长 %dmg\r\n\r\n",
-                       ptp, (s_still_min + s_still_max) / 2);
+                printf("[hy-fall] 抖动 %dmg 模长 %dmg 失重 %dms\r\n\r\n",
+                       ptp, (s_still_min + s_still_max) / 2, s_fall_ff_len);
             } else {
                 printf("[hy-fall] 已排除：未静止（5 秒内抖动 %dmg > %dmg）\r\n",
                        ptp, FALL_STILL_PTP);
@@ -598,6 +644,13 @@ static void fall_update(int ax, int ay, int az, uint64_t now)
         g_hy.fall_still_ms = (int)(now - s_fall_t0);
         if (s_act_ready && s_act_ptp >= FALL_MOVE_PTP) {
             printf("[hy-fall] 已解除（检测到活动，峰峰 %dmg）\r\n", s_act_ptp);
+            s_fall_state = FALL_IDLE;
+            g_hy.fall_state = FALL_IDLE;
+            g_hy.fall_still_ms = 0;
+        } else if (now - s_fall_t0 >= FALL_TIMEOUT_MS) {
+            /* 3 分钟没人确认也没动：自动解除，避免永久挂在告警态。
+             * 记录（fall_events）保留，便于事后回看。 */
+            printf("[hy-fall] 3 分钟无确认，自动解除（记录保留）\r\n");
             s_fall_state = FALL_IDLE;
             g_hy.fall_state = FALL_IDLE;
             g_hy.fall_still_ms = 0;

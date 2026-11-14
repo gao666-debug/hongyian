@@ -77,7 +77,7 @@ static void hy_sensor_entry(void)
     osal_task *task = NULL;
 
     printf("\r\n\r\n==============================================\r\n");
-    printf("  BUILD=HY-CLOUD-19 (服务ID改为 11) %s %s\r\n", __DATE__, __TIME__);
+    printf("  BUILD=HY-CLOUD-21 (失重判摔-演示加固) %s %s\r\n", __DATE__, __TIME__);
     printf("  MPU6050(0x68/0x69) + MAX3010x(0x57)  I2C 自诊断点亮\r\n");
     printf("  LCD=%s  上云=%s\r\n", HY_LCD_ENABLE ? "ON" : "OFF",
            HY_CLOUD_ENABLE ? "ON" : "OFF");
