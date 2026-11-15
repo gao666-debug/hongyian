@@ -39,6 +39,9 @@ struct HomeCameraPage {
   @State cameraOnline:boolean=false;
   @State neverReceived:boolean=false;
   private smoothFailures:number=0;
+  // 局域网重连退避计数。摄像头连接池耗尽时它会一段时间不响应，
+  // 此时高频重连等于往已经堵死的队列里继续灌请求，所以必须退避并封顶。
+  private lanRetries:number=0;
   @State recording:boolean=false;
   @State clipReady:boolean=false;
   @State mediaMessage:string='';
@@ -89,7 +92,7 @@ struct HomeCameraPage {
   private offerFrame(jpeg:Uint8Array,generation:number):void{
     if(generation!==this.generation){return;}
     this.latest=jpeg;this.lastFrameAt=Date.now();
-    this.smoothFailures=0;this.needBinding=false;this.failed=false;
+    this.smoothFailures=0;this.lanRetries=0;this.needBinding=false;this.failed=false;
     const now=Date.now();
     if(this.recording&&(!this.recorded.length||now-this.recorded[this.recorded.length-1].at>=200)){
       if(this.recordBytes+jpeg.length>16777216){this.finishRecording();}
@@ -130,12 +133,28 @@ struct HomeCameraPage {
         this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);
       });return;
     }
-    try{await this.feed.start(this.source,this.username,this.password,(jpeg:Uint8Array)=>{this.offerFrame(jpeg,generation);},()=>{
-      if(generation===this.generation){this.failed=true;this.message='视频中断，正在重新连接';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},2000);}
-    });}catch(error){if(generation===this.generation){this.failed=true;this.message='流畅连接失败，可切换省流模式';this.frameTimer=setTimeout(()=>{this.startFeed(generation);},3000);}}
+    // 局域网固定走 80 端口 1 秒/帧串行取图，不再请求 81 端口，也不用 200ms 高频轮询：
+    // 81 是单客户端阻塞式 WebServer，一推就挂；200ms 会在 40 秒内耗尽 ESP32 的 TCP 连接池。
+    // 两条路都会让整机从网络上消失，所以这里只保留已验证稳定的省流节奏。
+    this.feed.startPolling(this.source,this.username,this.password,(jpeg:Uint8Array)=>{this.offerFrame(jpeg,generation);},()=>{
+      if(generation!==this.generation){return;}
+      this.failed=true;
+      this.lanRetries++;
+      if(this.lanRetries>3){
+        // 失败三次就停手，把判断权交回用户：继续打只会拖长摄像头的恢复时间。
+        this.message='摄像头没有应答，请确认它已通电（建议充电宝供电）后点“重新连接”';
+        return;
+      }
+      const delay=Math.min(2000*this.lanRetries,8000);
+      this.message='画面中断，'+Math.round(delay/1000)+' 秒后重试';
+      this.frameTimer=setTimeout(()=>{this.startFeed(generation);},delay);
+    },1000);
   }
   private changeMode():void{
     if(this.recording){return;}
+    // 局域网连续视频必须由固件提供（独立任务 + chunked 传输），App 侧轮询做不到：
+    // 高频轮询会耗尽 ESP32 的连接池，把整台摄像头打挂且不自行恢复。
+    if(!this.remote){this.mediaMessage='局域网连续视频需升级摄像头固件，当前为省流取图（1 秒/帧）';return;}
     this.smooth=!this.smooth;this.smoothFailures=0;this.saveSmooth(this.smooth);
     if(this.source){this.connect(true);}
   }
@@ -250,7 +269,8 @@ struct HomeCameraPage {
       else { found=await this.connector.find(this.address,this.username,this.password,(value:string)=>{if(generation===this.generation){this.message=value;}}); }
       if (generation!==this.generation) { return; }
       this.address=found.address;this.source=found.address;this.settingsOpen=false;
-      if(this.smooth){this.startFeed(generation);}else{this.refreshFrame(generation);}
+      // 局域网只有一种取流方式：80 端口 1 秒/帧。统一走 startFeed，失败才有退避和封顶。
+      this.startFeed(generation);
       this.message='摄像头已就绪 · 正在加载实时画面';
       try {
         const context=getContext(this) as common.UIAbilityContext;
@@ -293,7 +313,7 @@ struct HomeCameraPage {
         Column({space:10}) {
           if(this.frame){Image(this.frame).objectFit(ImageFit.Contain).width('100%').layoutWeight(1)}
           else{Blank();Text('正在加载实时画面…').fontColor(CareTheme.secondary);Blank();}
-          Text(this.recording?'● 录像中 · 最长 60 秒':this.smooth?'连续视频 · 中断自动重连':'省流取图 · 中断自动重试').fontSize(13).fontColor(CareTheme.secondary).margin(12)
+          Text(this.recording?'● 录像中 · 最长 60 秒':!this.remote?'省流取图 · 1 秒/帧 · 中断自动重试':this.smooth?'连续视频 · 中断自动重连':'省流取图 · 中断自动重试').fontSize(13).fontColor(CareTheme.secondary).margin(12)
         }.layoutWeight(1).width('100%').backgroundColor(Color.White).borderRadius(16)
       } else {
         Column({space:14}) {
@@ -308,7 +328,7 @@ struct HomeCameraPage {
         Row({space:8}){
           Button('截图').enabled(!!this.frame&&!this.saving).layoutWeight(1).fontSize(13).backgroundColor(CareTheme.softBlue).fontColor(CareTheme.primary).onClick(()=>{this.saveMedia(false);})
           Button(this.recording?'结束录像':'录像').enabled(!!this.frame).layoutWeight(1).fontSize(13).backgroundColor(this.recording?CareTheme.alarm:CareTheme.softBlue).fontColor(this.recording?Color.White:CareTheme.primary).onClick(()=>{this.toggleRecording();})
-          Button(this.smooth?'流畅模式':'省流模式').enabled(!this.recording).layoutWeight(1).fontSize(13).backgroundColor(CareTheme.softBlue).fontColor(CareTheme.primary).onClick(()=>{this.changeMode();})
+          Button(!this.remote?'省流取图':this.smooth?'流畅模式':'省流模式').enabled(!this.recording&&this.remote).layoutWeight(1).fontSize(13).backgroundColor(CareTheme.softBlue).fontColor(this.remote?CareTheme.primary:CareTheme.secondary).onClick(()=>{this.changeMode();})
         }.width('100%')
       }
       if(this.clipReady){Button('保存录像（AVI）').enabled(!this.saving).fontSize(13).onClick(()=>{this.saveMedia(true);})}
@@ -329,7 +349,7 @@ struct HomeCameraPage {
           Button('使用此地址连接').enabled(!this.busy).fontColor(CareTheme.primary).backgroundColor(CareTheme.softBlue).width('100%').onClick(()=>{this.connect(true);})
         }.width('100%')
       }
-      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':(this.address?'已记住摄像头地址 · 打开即连，无需再次配置':'同一热点自动查找 · 配对成功后会记住地址')).fontSize(13).fontColor(CareTheme.secondary).margin({bottom:8})
+      Text(this.remote?'有人看才上传 · 退出或切后台自动停止 · 录像需保存':(this.address?'已记住摄像头地址 · 打开即连 · 请用充电宝或 5V/2A 以上独立供电':'同一热点自动查找 · 请用充电宝或 5V/2A 以上独立供电')).fontSize(13).fontColor(CareTheme.secondary).margin({bottom:8})
     }.padding({left:20,right:20,top:12,bottom:18}).width('100%').height('100%').backgroundColor(CareTheme.background)
   }
 }

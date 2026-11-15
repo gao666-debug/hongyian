@@ -18,6 +18,7 @@ import { VoiceCommand, VoiceIntent } from '../services/VoiceCommand';
 import { VoiceListen } from '../services/VoiceListen';
 import { medicineLabel, nightLabel, medicineTime, validMedicineTime, medicineSlots, slotLabel, pendingMedicine, demoLivingUpdate, livingCommandMatches } from '../models/Living';
 import { AlarmSnapshot, alarmStateLabel, alarmIsActive, noteText, resolutionLabel } from '../models/AlarmState';
+import { Conversation, ChatConversations } from '../models/Messaging';
 import { doorLabel } from '../models/DoorState';
 import { AlarmInbox, mergeAlarms } from '../models/AlarmInbox';
 import { assessCare, CareAssessment } from '../models/CareAssessment';
@@ -70,6 +71,16 @@ struct Index {
   @State remindMessage: string = '';
   @State remindOpen: boolean = false;
   @State remindTargets: string[] = [];
+  // 「更多操作 → 提醒家人」：不挂在任何一条报警上，走家人消息（会落库、计未读、离线可补收）。
+  // 看画面或联系不上老人时都能用，只读成员也能发。
+  @State familyRemindOpen: boolean = false;
+  @State familyRemindText: string = '';
+  @State familyRemindBusy: boolean = false;
+  @State familyRemindStatus: string = '';
+  @State familyRemindChats: Conversation[] = [];
+  @State familyRemindCid: string = '';
+  private familyRemindRetry: string = '';
+  private readonly familyRemindPhrases: string[] = ['刚看了家中画面，有点不放心，麻烦帮忙确认一下', '联系不上老人，谁方便去看一下', '家里好像有异常，请尽快看一下'];
   // 演示模式默认权限全开，打开此开关后按只读成员体验，便于展示「提醒家人」流程。
   @State demoReadonly: boolean = false;
   @State demoReadonlyMessage: string = '';
@@ -268,6 +279,9 @@ struct Index {
   @State imuValid: boolean = false;
   @State healthKnown: boolean = false;
   @State healthReceived: number = 0;
+  // 主板时钟与手机时钟的偏差（秒）。只用于提示，不作为锁定操作的依据：
+  // 主板 SNTP 对时错误时不能让生活提醒整页变成只读。
+  @State clockSkew: number = 0;
   @State muted: boolean = false;
   @State firmware: string = '';
   @State doorRecords:DoorRecords|null=null;
@@ -431,12 +445,16 @@ struct Index {
     this.status = typeof p.status === 'number' ? p.status : -1;
   }
   private applyHealth(h: Health): void {
-    const signature = JSON.stringify(h);
-    if (signature !== this.healthSignature) {
-      this.healthReceived = h.epoch && h.epoch > 0 ? h.epoch * 1000 : Date.now();
-      this.healthSignature = signature;
-    }
-    this.livingDataFresh = h.data_stale !== true;
+    // 新鲜度必须由"本机什么时候收到"决定。原实现只在内容签名变化时才刷新
+    // healthReceived，而板子内容稳定时（环境读数不变、up/epoch 重复）签名恒定，
+    // 120 秒后 healthFresh() 判为过期，生活提醒整页锁成"设备状态待同步"、
+    // 开关与保存按钮全部禁用。这里每次收到上报都刷新接收时间。
+    this.healthReceived = Date.now();
+    this.healthSignature = JSON.stringify(h);
+    // 设备时钟仅用于提示偏差：板子 epoch 与手机相差过大时提醒定时可能不准。
+    this.clockSkew = h.time_synced === true && typeof h.epoch === 'number' && h.epoch > 0
+      ? h.epoch - Math.floor(Date.now() / 1000) : 0;
+    this.livingDataFresh = h.data_stale !== true && (h.sample_age_s === undefined || h.sample_age_s <= 300);
     this.living = h.living && (h.living.schema === 1 || h.living.schema === 2) ? h.living : null;
     this.healthBoot = typeof h.boot_id === 'number' ? h.boot_id : -1;
     this.healthUp = typeof h.up === 'number' ? h.up : -1;
@@ -939,6 +957,11 @@ struct Index {
         token: '', expiresAt: 0, devices: previous.devices, lastUsed: previous.lastUsed });
     }
   }
+  private clockSkewLabel(): string {
+    const s = Math.abs(this.clockSkew);
+    if (s < 3600) { return Math.max(1, Math.round(s / 60)) + ' 分钟'; }
+    return (s / 3600).toFixed(1).replace(/\.0$/, '') + ' 小时';
+  }
   private livingFresh(): boolean { return this.demo || this.livingDataFresh && this.healthFresh() && this.online && this.loggedIn; }
   private openLiving(): void {
     if (!this.living) { this.livingMessage='等待设备生活提醒状态；收到上报后可进行设置'; this.livingOpen=true; return; }
@@ -1200,11 +1223,18 @@ struct Index {
   @Builder
   careActions() {
     Column({space:10}) {
-      Row({space:12}) {
-        Button(this.careActionBusy?'提交中…':'主动呼救').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(Color.White).backgroundColor(RED).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('control')).onClick(()=>{this.careAction(true);})
-        Button('一键处理全部').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('alarms.handle')).onClick(()=>{this.chooseBatchScope();})
-      }.width('100%')
+      if(this.allowed('control')||this.allowed('alarms.handle')){
+        Row({space:12}) {
+          Button(this.careActionBusy?'提交中…':'主动呼救').fontSize(this.readableSize(15)).fontWeight(FontWeight.Bold).fontColor(Color.White).backgroundColor(RED).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('control')).onClick(()=>{this.careAction(true);})
+          Button('一键处理全部').fontSize(this.readableSize(14)).fontWeight(FontWeight.Medium).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).height(this.elderMode?60:48).borderRadius(12).layoutWeight(1).enabled(!this.careActionBusy&&!this.noteSaving&&!this.commandBusy&&this.allowed('alarms.handle')).onClick(()=>{this.chooseBatchScope();})
+        }.width('100%')
+      }else{
+        Text('当前是只读成员：不能主动呼救或批量处置，但可以把看到的情况提醒给有处理权限的家人。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
+      }
       if(this.careActionMessage){Text(this.careActionMessage).fontSize(this.readableSize(13)).fontColor(SUB).width('100%')}
+      Divider().color(CareTheme.line).strokeWidth(0.5)
+      Button(this.familyRemindBusy?'正在发送…':'提醒家人',{type:ButtonType.Normal}).fontSize(this.readableSize(15)).fontWeight(FontWeight.Medium).fontColor(PRIMARY).backgroundColor(CareTheme.softBlue).height(this.elderMode?60:48).width('100%').borderRadius(12).enabled(!this.familyRemindBusy).onClick(()=>{this.openFamilyRemind();})
+      Text('不需要先有报警。看画面发现异常、或联系不上老人时，发一条家人消息即可；消息会留存，对方打开 App 就能看到。').fontSize(this.readableSize(12)).fontColor(SUB).width('100%').lineHeight(this.readableLine(18))
     }.padding(16).backgroundColor(Color.White).borderRadius(16).width('100%').margin({top:16,bottom:8})
   }
   private async showAlarm(item: AlarmEvent): Promise<void> {
@@ -1232,9 +1262,15 @@ struct Index {
   private openRemind(): void {
     if (!this.selected) { return; }
     const candidates = this.remindCandidates();
-    if (!candidates.length) { this.remindMessage = '当前家庭没有其他可处理报警的成员'; return; }
-    this.remindTargets = candidates.map((item: HouseholdMember) => item.username);
     this.remindMessage = '';
+    if (!candidates.length) {
+      // 只读账号从后端拿到的成员名单被裁剪成只有自己（实测 members=[{'role':'viewer'}]），
+      // 于是筛不出可提醒的人。后端在 targets 为空时会把提醒展开给全部有处置权限的成员
+      // （实测 202，targets 自动变成 [111,222,444,guardian]），所以这里不用选人，直接发空数组。
+      this.remindTargets = [];
+    } else {
+      this.remindTargets = candidates.map((item: HouseholdMember) => item.username);
+    }
     this.remindOpen = true;
   }
   private toggleRemind(name: string): void {
@@ -1243,7 +1279,8 @@ struct Index {
   private async sendRemind(): Promise<void> {
     if (this.remindBusy||!this.selected) { return; }
     if (this.demo) { this.remindOpen=false; this.remindMessage='演示环境不会真的发送提醒，真实账号会通知已选成员'; return; }
-    if (!this.remindTargets.length) { this.remindMessage = '请至少选择一位成员'; return; }
+    // 名单可见时不允许空选；名单不可见（只读账号）时空数组就是"通知全部有处置权限的人"。
+    if (!this.remindTargets.length&&this.remindCandidates().length) { this.remindMessage = '请至少选择一位成员'; return; }
     const key=alarmKey(this.selected), generation=this.generation;
     const payload: RemindBody = { targets: this.remindTargets };
     const count=this.remindTargets.length;
@@ -1252,10 +1289,44 @@ struct Index {
       await this.api.request(this.api.path('alarms/'+key+'/remind'),http.RequestMethod.POST,JSON.stringify(payload));
       if(generation!==this.generation){return;}
       this.remindOpen=false;
-      this.remindMessage='已提醒 '+count+' 位成员，对方打开 App 即可看到';
+      this.remindMessage=count?'已提醒 '+count+' 位成员，对方打开 App 即可看到':'已通知全部有处理权限的成员，对方打开 App 即可看到';
     }catch(error){
       if(generation===this.generation){this.remindMessage='提醒未发送：'+(error as Error).message;}
     }finally{this.remindBusy=false;}
+  }
+  // 「更多操作 → 提醒家人」：不绑定报警，走家人消息会话，发出去会落库并计入对方未读。
+  private async openFamilyRemind(): Promise<void> {
+    this.familyRemindOpen = true; this.familyRemindStatus = ''; this.familyRemindText = ''; this.familyRemindCid = ''; this.familyRemindRetry = '';
+    if (this.demo) { this.familyRemindStatus = '演示环境不会真的发送提醒，真实账号会发到家庭会话'; return; }
+    if (!this.loggedIn) { this.familyRemindStatus = '请先在“我的”里登录家庭账号，再提醒家人'; return; }
+    try {
+      const reply = await this.api.request('/api/v1/conversations', http.RequestMethod.GET, '', 10000);
+      const items = (reply.data as ChatConversations).items || [];
+      // 只能往还有第二个人的会话里发；孤立的单人会话发出去没人看。
+      this.familyRemindChats = items.filter((item: Conversation) => item.kind === 'group' || item.member_count >= 2)
+        .sort((a: Conversation, b: Conversation) => (a.kind === 'group' ? 0 : 1) - (b.kind === 'group' ? 0 : 1));
+      if (this.familyRemindChats.length) { this.familyRemindCid = this.familyRemindChats[0].conversation_id; }
+      else { this.familyRemindStatus = '还没有可用的家庭会话。请到“我的 · 家人消息”里先和家属建立会话'; }
+    } catch (error) { this.familyRemindStatus = '读取家庭会话失败：' + (error as Error).message; }
+  }
+  private familyRemindTitle(): string {
+    const found = this.familyRemindChats.find((item: Conversation) => item.conversation_id === this.familyRemindCid);
+    return found && found.title ? found.title : '家庭会话';
+  }
+  private async sendFamilyRemind(): Promise<void> {
+    if (this.familyRemindBusy) { return; }
+    const body = this.familyRemindText.trim();
+    if (!this.familyRemindCid) { this.familyRemindStatus = '还没有可用的家庭会话'; return; }
+    if (!body) { this.familyRemindStatus = '先写一句要家人确认什么，再发送'; return; }
+    if (this.demo) { this.familyRemindStatus = '演示环境不会真的发送提醒'; return; }
+    if (!this.familyRemindRetry) { this.familyRemindRetry = 'care-' + Date.now() + '-' + Math.random().toString(36).slice(2); }
+    this.familyRemindBusy = true; this.familyRemindStatus = '';
+    try {
+      await this.api.request('/api/v1/conversations/' + encodeURIComponent(this.familyRemindCid) + '/messages', http.RequestMethod.POST, JSON.stringify({ body: body, client_id: this.familyRemindRetry }), 10000);
+      this.familyRemindStatus = '已发送到“' + this.familyRemindTitle() + '”，对方打开 App 的“家人消息”即可看到';
+      this.familyRemindText = ''; this.familyRemindRetry = '';
+    } catch (error) { this.familyRemindStatus = '提醒未发送：' + (error as Error).message; }
+    finally { this.familyRemindBusy = false; }
   }
   private async pollUnread(): Promise<void> {
     if(this.unreadPolling||!this.loggedIn||this.demo){return;}
@@ -1646,6 +1717,9 @@ struct Index {
       Scroll() {
         Column({space:20}) {
           Text(this.demo?'演示设置，不操作真实设备':this.livingFresh()?'设置以设备回执为准':'设备状态待同步，当前仅可查看').fontSize(this.readableSize(14)).fontColor(this.livingFresh()?SUB:AMBER).width('100%')
+          if (!this.demo && Math.abs(this.clockSkew) > 300) {
+            Text('主板时间与手机相差约 '+this.clockSkewLabel()+'，按时段的服药提醒可能不准，建议主板重新联网对时').fontSize(this.readableSize(14)).fontColor(AMBER).width('100%')
+          }
           Column({space:14}) {
             Row({space:10}){this.icon($r('app.media.lamp'),24);Column({space:5}){Text('自动夜灯').fontSize(this.readableSize(18)).fontWeight(FontWeight.Bold).fontColor(INK);Text(nightLabel(this.living,this.livingFresh())).fontSize(this.readableSize(14)).fontColor(SUB)}.layoutWeight(1).alignItems(HorizontalAlign.Start);Toggle({type:ToggleType.Switch,isOn:this.nightDraft}).selectedColor(PRIMARY).enabled(!this.livingBusy&&this.livingFresh()&&this.allowed('control')).onChange((v:boolean)=>{this.nightDraft=v;this.livingMessage='自动夜灯设置待保存，请点击保存提醒设置';})}.width('100%')
             Text('开关用于启用自动感光；修改后需保存。低于 30 lx 开灯，高于 60 lx 关灯').fontSize(this.readableSize(14)).fontColor(SUB).width('100%')
@@ -2270,25 +2344,60 @@ struct Index {
         Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{if(!this.remindBusy){this.remindOpen=false;}})
       }.width('100%')
       Text('只会通知有处理权限的成员；提醒不会改变这条报警的状态，也不代表已经有人处理。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%')
-      Row({space:10}) {
-        Text('已选 '+this.remindTargets.length+'/'+this.remindCandidates().length+' 人').fontSize(this.readableSize(13)).fontColor(SUB).layoutWeight(1)
-        Text('全选').fontSize(this.readableSize(13)).fontColor(PRIMARY).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=this.remindCandidates().map((item: HouseholdMember)=>item.username);})
-        Text('清空').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=[];})
-      }.width('100%')
-      Column() {
-        ForEach(this.remindCandidates(),(item: HouseholdMember)=>{
-          Row({space:8}) {
-            Checkbox({name:item.username}).select(this.remindTargets.includes(item.username)).selectedColor(PRIMARY).onChange((value: boolean)=>{this.toggleRemind(item.username);})
-            Column({space:3}) {
-              Text(item.username).fontSize(this.readableSize(15)).fontColor(INK).width('100%')
-              Text(roleLabel(item.role)).fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
-            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-          }.width('100%').padding({top:6,bottom:6})
-        },(item: HouseholdMember)=>item.username)
-      }.width('100%')
+      if(this.remindCandidates().length){
+        Row({space:10}) {
+          Text('已选 '+this.remindTargets.length+'/'+this.remindCandidates().length+' 人').fontSize(this.readableSize(13)).fontColor(SUB).layoutWeight(1)
+          Text('全选').fontSize(this.readableSize(13)).fontColor(PRIMARY).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=this.remindCandidates().map((item: HouseholdMember)=>item.username);})
+          Text('清空').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:36}).textAlign(TextAlign.Center).onClick(()=>{this.remindTargets=[];})
+        }.width('100%')
+        Column() {
+          ForEach(this.remindCandidates(),(item: HouseholdMember)=>{
+            Row({space:8}) {
+              Checkbox({name:item.username}).select(this.remindTargets.includes(item.username)).selectedColor(PRIMARY).onChange((value: boolean)=>{this.toggleRemind(item.username);})
+              Column({space:3}) {
+                Text(item.username).fontSize(this.readableSize(15)).fontColor(INK).width('100%')
+                Text(roleLabel(item.role)).fontSize(this.readableSize(12)).fontColor(SUB).width('100%')
+              }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            }.width('100%').padding({top:6,bottom:6})
+          },(item: HouseholdMember)=>item.username)
+        }.width('100%')
+      }else{
+        // 只读账号的成员名单被后端裁剪成只有自己，无法逐位选择；发送空 targets 由后端展开。
+        Text('当前账号看不到完整成员名单。点“发送提醒”会自动通知全部有处理权限的成员，不需要逐位选择。').fontSize(this.readableSize(13)).fontColor(SUB).width('100%').lineHeight(this.readableLine(20))
+      }
       if(this.remindMessage){Text(this.remindMessage).fontSize(this.readableSize(12)).fontColor(this.remindMessage.indexOf('未发送')>=0?AMBER:PRIMARY).width('100%').lineHeight(this.readableLine(19))}
-      Button(this.remindBusy?'正在发送…':'发送提醒',{type:ButtonType.Normal}).width('100%').constraintSize({minHeight:48}).backgroundColor(PRIMARY).fontColor(Color.White).borderRadius(12).fontSize(this.readableSize(15)).enabled(!this.remindBusy&&this.remindTargets.length>0).onClick(()=>{this.sendRemind();})
+      Button(this.remindBusy?'正在发送…':'发送提醒',{type:ButtonType.Normal}).width('100%').constraintSize({minHeight:48}).backgroundColor(PRIMARY).fontColor(Color.White).borderRadius(12).fontSize(this.readableSize(15)).enabled(!this.remindBusy&&(this.remindTargets.length>0||this.remindCandidates().length===0)).onClick(()=>{this.sendRemind();})
     }.padding(22).width('90%').backgroundColor(Color.White).borderRadius(16)
+  }
+  @Builder
+  familyRemindSheet() {
+    Scroll() {
+      Column({space:12}) {
+        Row() {
+          Text('提醒家人').fontSize(this.readableSize(20)).fontWeight(FontWeight.Bold).fontColor(INK)
+          Blank()
+          Text('关闭').fontSize(this.readableSize(13)).fontColor(SUB).constraintSize({minWidth:44,minHeight:44}).textAlign(TextAlign.End).onClick(()=>{if(!this.familyRemindBusy){this.familyRemindOpen=false;}})
+        }.width('100%')
+        Text('这条提醒不挂在报警上，会作为家人消息留存；对方当时不在线，打开 App 的“家人消息”也能看到。').fontSize(this.readableSize(13)).fontColor(SUB).lineHeight(this.readableLine(20)).width('100%')
+        if(this.familyRemindChats.length>1){
+          Scroll() {
+            Row({space:8}) {
+              ForEach(this.familyRemindChats,(item:Conversation)=>{
+                Button(item.title||'家庭会话',{type:ButtonType.Normal}).fontSize(this.readableSize(12)).fontColor(this.familyRemindCid===item.conversation_id?Color.White:PRIMARY).backgroundColor(this.familyRemindCid===item.conversation_id?PRIMARY:CareTheme.softBlue).height(34).borderRadius(10).onClick(()=>{this.familyRemindCid=item.conversation_id;})
+              },(item:Conversation)=>item.conversation_id)
+            }
+          }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%')
+        }
+        Column({space:8}) {
+          ForEach(this.familyRemindPhrases,(phrase:string)=>{
+            Text(phrase).fontSize(this.readableSize(13)).fontColor(INK).width('100%').padding(12).backgroundColor(BG).borderRadius(10).onClick(()=>{this.familyRemindText=phrase;})
+          },(phrase:string)=>phrase)
+        }.width('100%')
+        TextArea({text:this.familyRemindText,placeholder:'也可以自己写一句，例如：门口有人徘徊，先别开门'}).maxLength(120).height(88).fontSize(this.readableSize(13)).backgroundColor(BG).borderRadius(10).onChange((value:string)=>{this.familyRemindText=value;})
+        if(this.familyRemindStatus){Text(this.familyRemindStatus).fontSize(this.readableSize(12)).fontColor(this.familyRemindStatus.indexOf('已发送')>=0?PRIMARY:AMBER).width('100%').lineHeight(this.readableLine(19))}
+        Button(this.familyRemindBusy?'正在发送…':'发送提醒',{type:ButtonType.Normal}).width('100%').constraintSize({minHeight:48}).backgroundColor(PRIMARY).fontColor(Color.White).borderRadius(12).fontSize(this.readableSize(15)).enabled(!this.familyRemindBusy&&this.familyRemindCid!=='').onClick(()=>{this.sendFamilyRemind();})
+      }.padding(22).width('100%')
+    }.width('92%').constraintSize({maxHeight:'80%'}).backgroundColor(Color.White).borderRadius(16).scrollBar(BarState.Off)
   }
   @Builder
   incomingSheet() {
@@ -2407,6 +2516,7 @@ struct Index {
   }
   onBackPress():boolean {
     if(this.remindOpen&&!this.remindBusy){this.remindOpen=false;return true;}
+    if(this.familyRemindOpen&&!this.familyRemindBusy){this.familyRemindOpen=false;return true;}
     if(this.livingOpen&&!this.livingBusy){this.livingOpen=false;return true;}
     if(this.selected&&!this.noteSaving){this.closeAlarm();return true;}
     if(this.profileOpen&&!this.profileSaving){this.profileOpen=false;return true;}
@@ -2431,6 +2541,10 @@ struct Index {
       if(this.remindOpen){
         Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.remindBusy){this.remindOpen=false;}})
         this.remindSheet()
+      }
+      if(this.familyRemindOpen){
+        Rect().fill('#660B2028').width('100%').height('100%').onClick(()=>{if(!this.familyRemindBusy){this.familyRemindOpen=false;}})
+        this.familyRemindSheet()
       }
       if(this.livingOpen){this.livingSheet()}
       if(this.switchOpen){

@@ -27,6 +27,7 @@ export interface Health {
   living?: LivingStatus;
   epoch?: number; up?: number; boot_id?: number; fw?: string; env_valid?: number; imu_valid?: number; mute?: number; tls?: boolean;
   door_enabled?: number; door_valid?: number; wireless_btn_enabled?: number; data_state?: string; data_stale?: boolean;
+  sample_age_s?: number;
   env_available?: boolean; fall_detection_available?: boolean; time_synced?: boolean;
 }
 export interface Handling { resolution: string; username: string; created: number; account_deleted?: boolean; }
