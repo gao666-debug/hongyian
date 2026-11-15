@@ -28,3 +28,7 @@ device/**/*.log
 # 星闪环境节点：本机凭据及烧录产物
 device/920_home_cloud/src/cfg.h
 device/**/*.img
+
+# 本地备份（可能含真实凭据），不入库
+*.bak_*
+*.bak
