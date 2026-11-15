@@ -38,8 +38,9 @@ export class CameraConnection {
     try {
       const response=await client.request(base+'/status',{
         method:http.RequestMethod.GET,
-        // Arduino ESP32 WebServer skips one character after the header colon.
-        // Explicit optional whitespace keeps Basic authentication compatible with its parser.
+        // 值必须以空格开头：OpenHarmony 的 http 按 "key:value" 直接拼装请求行，不会自动补空格；
+        // 而 ESP32 WebServer 解析 Authorization 时会固定跳过冒号后一个字符。
+        // 两者相抵后线上正好是 "Authorization: Basic xxx"（实测无空格或两个空格都会 401）。
         header:{'Authorization':' Basic '+basic,'Cache-Control':'no-store'},
         usingProtocol:http.HttpProtocol.HTTP1_1,usingCache:false,usingProxy:false,connectTimeout:1500,readTimeout:6000,expectDataType:http.HttpDataType.STRING
       });
@@ -93,7 +94,20 @@ export class CameraConnection {
         if (found) { return found; }
       }
     }
+    await this.explainAuth(first,username,password);
     throw new Error('没有找到就绪的摄像头。请确认摄像头通电、连接同一热点，且账号密码正确');
+  }
+  // 已知候选地址里如果有一台明确回了 401，说明摄像头在线但凭据不对，
+  // 这时不该再报“没找到摄像头”，否则用户会去查电源和 Wi-Fi。
+  private async explainAuth(addresses:string[], username:string, password:string): Promise<void> {
+    for (const address of addresses) {
+      try { await this.probe(address,username,password); }
+      catch (error) {
+        if ((error as Error).message === '摄像头账号或密码不正确') {
+          throw new Error('已找到摄像头，但账号或密码不正确，请在“连接设置”里核对');
+        }
+      }
+    }
   }
   private async batch(addresses:string[], username:string, password:string): Promise<CameraFound | null> {
     if(!addresses.length){return null;}

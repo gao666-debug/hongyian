@@ -18,8 +18,10 @@ interface RemoteCameraStatus { configured:boolean; online:boolean; received_at?:
 struct HomeCameraPage {
   @State address: string = '';
   @State source: string = '';
-  @State username: string = 'user';
-  @State password: string = '123456';
+  // 默认值与摄像头固件 secrets.h 中的 CAMERA_USER / CAMERA_PASSWORD 保持一致，
+  // 这样"一键连接摄像头"无需用户先手填账号密码。
+  @State username: string = 'guardian';
+  @State password: string = 'yihongan2026';
   @State message: string = '同一网络，一键看见家中';
   @State busy: boolean = false;
   @State settingsOpen: boolean = false;
@@ -182,6 +184,7 @@ struct HomeCameraPage {
     try {
       const basic=new util.Base64Helper().encodeToStringSync(new util.TextEncoder().encodeInto(this.username+':'+this.password));
       const response=await client.request(this.source+'/capture?t='+Date.now(),{
+        // 值前的空格不能省：OpenHarmony 拼 "key:value" 不加空格，ESP32 解析时固定跳过一个字符。
         method:http.RequestMethod.GET,header:{'Authorization':' Basic '+basic,'Cache-Control':'no-store'},
         usingProtocol:http.HttpProtocol.HTTP1_1,usingCache:false,usingProxy:false,connectTimeout:2500,readTimeout:6000,expectDataType:http.HttpDataType.ARRAY_BUFFER
       });

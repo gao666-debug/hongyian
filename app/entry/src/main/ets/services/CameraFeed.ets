@@ -25,6 +25,7 @@ export class CameraFeed {
   }
   async start(base:string,user:string,password:string,onFrame:(jpeg:Uint8Array)=>void,onEnd:()=>void):Promise<void>{
     this.stop();const generation=this.generation;
+    // 值前的空格不能省：OpenHarmony 拼 "key:value" 不加空格，ESP32 解析时固定跳过一个字符。
     const auth=' Basic '+new util.Base64Helper().encodeToStringSync(new util.TextEncoder().encodeInto(user+':'+password));
     const control=http.createHttp();this.ticketClient=control;
     try{

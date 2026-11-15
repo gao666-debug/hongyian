@@ -10,10 +10,61 @@ WebServer streamServer(81);
 SemaphoreHandle_t cameraLock;
 String streamTicket;
 bool streamAvailable = false;
+// 81 端口是单客户端阻塞式服务：只要有一路连接挂着（例如手机锁屏后 socket 半开，
+// 对端不再读但也不发 FIN），新连接就只能排在 accept 队列里拿不到响应，
+// App 侧表现为“流畅模式一直加载”，而 80 端口的省流取图照常可用。
+// 每次 App 申请 ticket 就递增此编号；正在推的旧流发现编号变了立即让位给新连接。
+volatile uint32_t streamTakeover = 0;
 bool cameraReady = false;
 esp_err_t cameraError = ESP_OK;
 uint32_t reconnectAt = 0;
 #include "cloud_upload.h"
+
+// 诊断用：把关联失败的原因码翻譯成人能看懂的话，避免只看到 wifi=0 无从下手。
+const char *wifiReasonText(uint8_t r) {
+  switch (r) {
+    case 2:   return "AUTH_EXPIRE";
+    case 15:  return "4WAY_HANDSHAKE_TIMEOUT (密码错误)";
+    case 201: return "NO_AP_FOUND (扫不到该热点)";
+    case 202: return "AUTH_FAIL (认证被拒)";
+    case 203: return "ASSOC_FAIL (关联被拒)";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    case 8:   return "ASSOC_LEAVE";
+    default:  return "其他";
+  }
+}
+
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+    Serial.println("[wifi] 已关联 AP，等待 DHCP");
+  } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    Serial.printf("[wifi] 拿到 IP: %s 网关: %s\n",
+                  WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str());
+  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    const uint8_t reason = info.wifi_sta_disconnected.reason;
+    Serial.printf("[wifi] 断开 reason=%u %s\n", reason, wifiReasonText(reason));
+  }
+}
+
+// 开机扫一遍周边热点，确认 ESP32 自己能否看见目标 SSID（不是靠电脑判断）。
+void scanWifi() {
+  Serial.println("[wifi] 开始扫描周边热点…");
+  const int n = WiFi.scanNetworks();
+  Serial.printf("[wifi] 扫到 %d 个热点\n", n);
+  bool found = false;
+  for (int i = 0; i < n && i < 20; ++i) {
+    const String ssid = WiFi.SSID(i);
+    const bool target = ssid == WIFI_SSID;
+    if (target) found = true;
+    Serial.printf("[wifi] #%02d %-24s rssi=%d ch=%d enc=%d%s\n", i, ssid.c_str(),
+                  WiFi.RSSI(i), WiFi.channel(i), static_cast<int>(WiFi.encryptionType(i)),
+                  target ? "   <== 目标热点" : "");
+  }
+  Serial.printf("[wifi] 目标 SSID='%s' 密码长度=%u 扫描可见=%s\n",
+                WIFI_SSID, static_cast<unsigned>(strlen(WIFI_PASSWORD)), found ? "是" : "否");
+  WiFi.scanDelete();
+}
 
 bool authorized() {
   if (server.authenticate(CAMERA_USER, CAMERA_PASSWORD)) return true;
@@ -55,9 +106,22 @@ void liveStream() {
   }
   WiFiClient client = streamServer.client();
   client.setTimeout(3);
+  client.setNoDelay(true);
+  const uint32_t myTakeover = streamTakeover;
+  uint32_t lastFrameAt = millis();
   client.print("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\n"
                "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
   while (client.connected() && WiFi.status() == WL_CONNECTED) {
+    // 有新观看请求（App 重新进入页面/自动重连）就让位，不等旧连接自己超时。
+    if (streamTakeover != myTakeover) {
+      Serial.println("[camera] stream yielded to newer viewer");
+      break;
+    }
+    // 连续 15 秒送不出整帧，说明对端已不读：主动断开，避免长期占住 81 端口。
+    if (millis() - lastFrameAt > 15000) {
+      Serial.println("[camera] stream stalled; closing");
+      break;
+    }
     if (xSemaphoreTake(cameraLock, pdMS_TO_TICKS(500)) != pdTRUE) {
       delay(10);
       continue;
@@ -72,6 +136,7 @@ void liveStream() {
     }
     xSemaphoreGive(cameraLock);
     if (!sent) break;
+    lastFrameAt = millis();
     delay(100);
   }
   client.stop();
@@ -101,7 +166,7 @@ bool ensureStreamTask() {
 
 void statusPage() {
   if (!authorized()) return;
-  String json = "{\"firmware\":\"camera-v0.3.2\",\"camera_ready\":";
+  String json = "{\"firmware\":\"camera-v0.3.5\",\"camera_ready\":";
   json += cameraReady ? "true" : "false";
   json += ",\"camera_error\":" + String(static_cast<int>(cameraError));
   json += ",\"wifi_connected\":";
@@ -157,7 +222,7 @@ void initCamera() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n[boot] YiHongAn Camera v0.3.2");
+  Serial.println("\n[boot] YiHongAn Camera v0.3.5");
   Serial.printf("[boot] cloud_enabled=%d free_heap=%u psram=%u\n", CLOUD_ENABLED, ESP.getFreeHeap(), ESP.getPsramSize());
   cameraLock = xSemaphoreCreateMutex();
   if (!cameraLock) {
@@ -171,8 +236,13 @@ void setup() {
   }
   initCamera();
   WiFi.mode(WIFI_STA);
+  WiFi.onEvent(onWifiEvent);
+  WiFi.disconnect();
+  delay(100);
+  scanWifi();
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.println("[wifi] 已发起连接，等待分配 IP…");
   server.on("/", HTTP_GET, []() {
     if (!authorized()) return;
     server.send(200, "text/html; charset=utf-8", R"HTML(<!doctype html>
@@ -199,6 +269,8 @@ window.addEventListener('pagehide',stop);
       server.send(503, "application/json", "{\"error\":\"stream_unavailable\"}");
       return;
     }
+    // 新观看者到来：让当前还在推的旧连接让位，避免半开连接长期占住 81 端口。
+    ++streamTakeover;
     server.send(200, "application/json", "{\"ticket\":\"" + streamTicket + "\"}");
   });
   server.on("/capture", HTTP_GET, snapshot);
