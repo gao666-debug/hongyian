@@ -53,7 +53,7 @@
  * VOICE_DEDICATED_IDX = 0：关闭报警语音，避免工厂数值词条把报警播成温度0等；蜂鸣器保留。
  * VOICE_DEDICATED_IDX = 1：使用专用报警词条 4~8（需先在 SU-03T 平台配好 4~8 词条）*/
 #ifndef VOICE_DEDICATED_IDX
-#define VOICE_DEDICATED_IDX         0
+#define VOICE_DEDICATED_IDX         1
 #endif
 
 #if VOICE_DEDICATED_IDX

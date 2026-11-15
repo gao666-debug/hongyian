@@ -28,6 +28,12 @@
 
 #include "los_task.h"
 
+/* 串口发送诊断：HAL 的 IoTUartWrite 返回值不可信（详见 write_frame 注释），
+ * 默认关闭，只有在怀疑 UART2 驱动异常时才置 1。 */
+#ifndef SU03T_UART_DEBUG
+#define SU03T_UART_DEBUG    0
+#endif
+
 #include "iot_errno.h"
 #include "iot_uart.h"
 
@@ -82,7 +88,15 @@ static void write_frame(const uint8_t *data, unsigned size)
     safety_lock();
     int n = IoTUartWrite(UART2_HANDLE, data, size);
     safety_unlock();
-    if (n != (int)size) printf("[voice] UART frame incomplete %d/%u\n", n, size);
+    /* 这个返回值不可信：HAL 内部拿 LzUartWrite() 的“写入字节数”当状态码比较
+     * （6 != 0 即判失败），所以成功发送也会返回 IOT_FAILURE(1)。
+     * 默认不打印，避免每发一帧都刷一行假警报；要查驱动问题再置 1。 */
+#if SU03T_UART_DEBUG
+    if (n != 0) printf("[voice] UART write ret=%d len=%u\n", n, size);
+#else
+    (void)n;
+#endif
+    (void)size;
 }
 
 /* 固定句应答帧：AA 55 <index> 00 55 AA。
@@ -410,6 +424,13 @@ static void voice_light(uint8_t param, uint64_t now)
                param == 2 ? SU03T_SAY_LIGHT_OFF : SU03T_SAY_LIGHT_AUTO, now);
 }
 
+/* 语音页号 → LCD 页号。七页与 ui_present() 的 0~6 一一对应，
+ * 顺序按用户说话习惯排（记录在前，维护用的诊断/配对在后）。 */
+static const uint8_t s_page_map[SU03T_PAGE_COUNT] = {1, 2, 0, 3, 4, 5, 6};
+static const char *const s_page_name[SU03T_PAGE_COUNT] = {
+    "记录一页", "记录二页", "主页", "诊断", "生活提醒", "联系人", "手机配对"
+};
+
 static void voice_query(uint8_t param, uint64_t now)
 {
     switch (param) {
@@ -422,8 +443,19 @@ static void voice_query(uint8_t param, uint64_t now)
         answer_query(1, now);
         answer_query(2, now);
         if (s_say_n >= 2 && s_say[s_say_n - 1].index == SU03T_VAL_IDX_HUMI)
-            s_say[s_say_n - 1].due = now + 1400;
+            s_say[s_say_n - 1].due = now + SU03T_CHAIN_STEP_MS;
         break;
+    case 6: {
+        /* 温湿度光照三连播：第一句立刻发，后面逐句错开，取不到数也不会打乱节奏 */
+        int first = s_say_n;
+        answer_query(1, now);
+        answer_query(2, now);
+        answer_light(now);
+        unsigned step = 0;
+        for (int i = first; i < s_say_n; ++i, ++step)
+            s_say[i].due = now + SU03T_CHAIN_STEP_MS * step;
+        break;
+    }
     default: break;
     }
 }
@@ -469,13 +501,17 @@ static int handle_extended(uint8_t prefix, uint8_t param, uint64_t now)
         if (param < 1 || param > 3) return 0;
         voice_light(param, now); return 1;
     case SU03T_PFX_QUERY:
-        if (param < 1 || param > 5) return 0;
+        if (param < 1 || param > 6) return 0;
         voice_query(param, now); return 1;
     case SU03T_PFX_PAGE:
-        if (param == 1) { request_page(1); set_note("记录一页", now); }
-        else if (param == 2) { request_page(2); set_note("记录二页", now); }
-        else if (param == 3) { request_page(0); set_note("返回主页", now); }
-        else return 0;
+        if (param >= 1 && param <= SU03T_PAGE_COUNT) {
+            request_page(s_page_map[param - 1]);
+            set_note(s_page_name[param - 1], now);
+        } else if (param == SU03T_PAGE_COUNT + 1) {
+            request_page(SU03T_PAGE_NEXT); set_note("下一页", now);
+        } else if (param == SU03T_PAGE_COUNT + 2) {
+            request_page(SU03T_PAGE_PREV); set_note("上一页", now);
+        } else return 0;
         printf("[voice] page request %u\n", param);
         return 1;
     default:
@@ -485,6 +521,15 @@ static int handle_extended(uint8_t prefix, uint8_t param, uint64_t now)
 
 void su03t_receive_bytes(const uint8_t *data, size_t len)
 {
+    /* 诊断：把 UART2 收到的原始字节打出来。收不到帧则无此行，
+     * 有帧则是硬件通路正常、问题在协议或 msgno 匹配。 */
+    if (len > 0) {
+        printf("[voice] rx %u:", (unsigned)len);
+        for (size_t k = 0; k < len && k < 20; ++k) {
+            printf(" %02X", data[k]);
+        }
+        printf("\n");
+    }
     for (size_t i = 0; i < len; ++i) {
         uint8_t byte = data[i];
         uint64_t now = LOS_TickCountGet();
@@ -518,12 +563,23 @@ void su03t_receive_bytes(const uint8_t *data, size_t len)
 static void su_03t_thread(void *arg)
 {
     (void)arg;
+    uint64_t hb_due = 0;
     while (1)
     {
         uint8_t data[64] = {0};
         int rec_len = IoTUartRead(UART2_HANDLE, data, sizeof(data));
         if (rec_len > 0 && rec_len <= (int)sizeof(data)) su03t_receive_bytes(data, rec_len);
         else say_flush(LOS_TickCountGet());
+
+        /* 心跳：每隔 10 秒打一行，证明语音线程活着、UART2 已打开。
+         * 烧完新固件若完全看不到这行，说明固件没进去或线程没起来。 */
+        {
+            uint64_t hb_now = LOS_TickCountGet();
+            if (hb_due == 0 || hb_now >= hb_due) {
+                printf("[voice] alive\n");
+                hb_due = hb_now + 10000;
+            }
+        }
 
 #if SU03T_SELF_TEST
         if (s_selftest_idx >= 4) {

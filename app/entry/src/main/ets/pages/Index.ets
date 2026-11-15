@@ -760,8 +760,8 @@ struct Index {
   }
   private async executeVoice(intent: VoiceIntent): Promise<void> {
     const type = intent.type;
-    const controlled=['light_on','light_off','light_auto','sos','medicine','ack'].includes(type);
-    const privateData=['temperature','trend','device','camera'].includes(type);
+    const controlled=['light_on','light_off','light_auto','sos','medicine','ack','help_off','mute'].includes(type);
+    const privateData=['temperature','trend','device','camera','gas','light_level'].includes(type);
     if(controlled&&!this.allowed('control')||privateData&&!this.allowed('view')){this.voiceReply='当前账号没有这项操作权限';return;}
     let reply = intent.reply;
     if (type === 'light_on' || type === 'light_off' || type === 'light_auto') {
@@ -780,20 +780,33 @@ struct Index {
       const pending = pendingMedicine(this.living);
       if (!this.living || !pending.length) { reply = '现在没有待确认的服药提醒'; }
       else { this.medicineNoticeSlot = pending[0].slot; this.confirmMedicine(); reply = '已记下这次服药'; }
-    } else if (type === 'ack') {
+    } else if (type === 'ack' || type === 'help_off') {
       if (!this.demo && !this.loggedIn) { reply = '还没登录家庭账号，无法确认报警'; }
-      else { this.command('ack'); reply = '正在确认报警，请在弹窗里核对'; }
+      else { this.command('ack'); reply = type === 'help_off' ? '正在解除求助，请在弹窗里确认' : '正在确认报警，请在弹窗里核对'; }
+    } else if (type === 'mute') {
+      if (!this.demo && !this.loggedIn) { reply = '还没登录家庭账号，无法静音'; }
+      else { this.command('mute'); reply = '正在消音，请在弹窗里确认'; }
+    } else if (type === 'unmute') {
+      reply = '取消静音请在设备上说一句“取消静音”，手机端目前只能静音';
     } else if (type === 'temperature') {
       const hasTemp = this.temp > -900;
       const hasHumi = this.humi > -900;
       if (hasTemp && hasHumi) { reply = '现在 ' + this.temp.toFixed(1) + ' 度，湿度 ' + this.humi.toFixed(0) + '%'; }
       else if (hasTemp) { reply = '现在 ' + this.temp.toFixed(1) + ' 度，湿度还没收到'; }
       else { reply = '还没收到温湿度数据，稍后再问一次'; }
+    } else if (type === 'gas') {
+      if (this.gas > -900) {
+        reply = '烟气估算 ' + this.gas.toFixed(0) + ' 参考 ppm，这是传感器估算，不能替代燃气报警器';
+      } else { reply = '还没收到烟气数据，稍后再问一次'; }
+    } else if (type === 'light_level') {
+      // App 里这个字段一处按 lx 显示、一处按 mV 采样显示，语音不硬报单位，避免说法与页面冲突。
+      if (this.light > -900) { reply = '现在光照 ' + this.light.toFixed(0) + '，单位以设备页面为准'; }
+      else { reply = '还没收到光照数据，稍后再问一次'; }
     } else if (type === 'alarm') { this.navigate(1); reply = '已打开报警记录'; }
     else if (type === 'trend') { this.navigate(2); reply = '已打开活动趋势'; }
     else if (type === 'device') { this.navigate(3); reply = '已打开设备状态'; }
     else if (type === 'camera') { this.detail = ''; router.pushUrl({ url: 'pages/Camera' }); reply = '正在打开家中画面'; }
-    else if (type === 'help') { reply = '我可以说：开灯、关灯、自动夜灯、救命、我吃过药了、现在温度、看报警、看趋势、看设备、打开摄像头'; }
+    else if (type === 'help') { reply = '我可以说：开灯、关灯、自动夜灯、救命、不舒服、取消求救、静音、我吃过药了、现在温度、燃气多少、光照多少、看报警、看趋势、看设备、打开摄像头'; }
     else if (type === 'awake') { reply = '我在，请说要做什么'; }
     this.voiceStatus = type === 'unknown' ? '这句没听懂，换个说法试试' : '已执行';
     this.voiceReply = reply;

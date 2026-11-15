@@ -204,10 +204,10 @@ def main():
                     errors.append("第 %d 行「%s」求助参数 %d 超出 1~2" % (i, name, param))
                 if msgno == 0x12 and not (1 <= param <= 4):
                     errors.append("第 %d 行「%s」服药参数 %d 超出 1~4" % (i, name, param))
-                if msgno == 0x14 and not (1 <= param <= 5):
-                    errors.append("第 %d 行「%s」查询参数 %d 超出 1~5" % (i, name, param))
-                if msgno == 0x15 and not (1 <= param <= 3):
-                    errors.append("第 %d 行「%s」翻页参数 %d 超出 1~3" % (i, name, param))
+                if msgno == 0x14 and not (1 <= param <= 6):
+                    errors.append("第 %d 行「%s」查询参数 %d 超出 1~6" % (i, name, param))
+                if msgno == 0x15 and not (1 <= param <= 9):
+                    errors.append("第 %d 行「%s」翻页参数 %d 超出 1~9" % (i, name, param))
             if reply:
                 warns.append("第 %d 行「%s」命令词自带回复「%s」，会与主板应答连播两句" % (i, name, reply))
 

@@ -401,9 +401,14 @@ static void safety_monitor_thread(void *arg)
             else if(cmd.code==SAFETY_CMD_CONTACT)command_result=local_contact_execute(cmd.payload,sntp_get_epoch(),now);
             else command_result=living_execute(cmd.code,cmd.payload,sntp_get_epoch());
         }
-        /* 语音“看记录/回主页”：只在不编辑设置页时切换，避免打断本地编辑 */
+        /* 语音“看记录/回主页/翻页”：只在不编辑设置页时切换，避免打断本地编辑 */
         int voice_page=su03t_take_page();
-        if(voice_page>=0 && edit_field<0) page=voice_page;
+        if(voice_page>=0 && edit_field<0) {
+            /* 100/101 是相对翻页，按当前页加减；绝对页号直接跳 */
+            if(voice_page==SU03T_PAGE_NEXT) page=(page+1)%SU03T_PAGE_COUNT;
+            else if(voice_page==SU03T_PAGE_PREV) page=(page+SU03T_PAGE_COUNT-1)%SU03T_PAGE_COUNT;
+            else page=voice_page;
+        }
         key_id_t long_key=key_take_long_event();
 #if KEY_ADC_DIAGNOSTIC
         long_key=KEY_NONE; /* Do not reboot or clear history on an ADC misclassification. */
